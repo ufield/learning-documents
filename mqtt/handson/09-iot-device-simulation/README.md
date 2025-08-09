@@ -36,120 +36,618 @@
 
 ### Exercise 1: IoTデバイスシミュレーター基盤
 
-`src/iot-device-simulator.js` を作成：
+`src/iot_device_simulator.py` を作成：
 
-```javascript
-const mqtt = require('mqtt');
-const chalk = require('chalk');
-const fs = require('fs').promises;
-const path = require('path');
+```python
+import paho.mqtt.client as mqtt
+import json
+import time
+import random
+import asyncio
+import threading
+import logging
+from datetime import datetime
+from typing import Dict, Any, Optional
+from rich.console import Console
+from rich.logging import RichHandler
 
-class IoTDevice {
-    constructor(config) {
-        this.deviceId = config.deviceId;
-        this.deviceType = config.deviceType;
-        this.location = config.location;
-        this.reportInterval = config.reportInterval || 30000; // 30秒
-        this.errorRate = config.errorRate || 0.02; // 2%エラー率
-        
-        // デバイス状態
-        this.isOnline = false;
-        this.batteryLevel = 100;
-        this.firmwareVersion = '1.0.0';
-        this.lastSeen = null;
-        
-        // センサーデータ生成用
-        this.sensorState = this.initializeSensorState();
-        
-        // MQTT設定
-        this.client = mqtt.connect('mqtt://localhost:1883', {
-            clientId: this.deviceId,
-            clean: false, // セッション保持
-            keepalive: 60,
-            will: {
-                topic: `devices/${this.deviceId}/status`,
-                payload: JSON.stringify({
-                    status: 'offline',
-                    timestamp: new Date().toISOString(),
-                    reason: 'unexpected_disconnect'
-                }),
-                qos: 1,
-                retain: true
-            }
-        });
-        
-        this.setupMQTTHandlers();
-        this.reportTimer = null;
-    }
+# ログ設定
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler()]
+)
+logger = logging.getLogger("IoTDevice")
+console = Console()
+
+class IoTDevice:
+    """IoTデバイスシミュレーター"""
     
-    initializeSensorState() {
-        const states = {
-            temperature: {
-                value: 20 + Math.random() * 10, // 20-30度
-                trend: 0,
-                noise: 0.5
-            },
-            humidity: {
-                value: 40 + Math.random() * 20, // 40-60%
-                trend: 0,
-                noise: 2
-            },
-            pressure: {
-                value: 1013 + Math.random() * 20, // 1013-1033 hPa
-                trend: 0,
-                noise: 1
-            }
-        };
+    def __init__(self, config: Dict[str, Any]):
+        self.device_id = config['device_id']
+        self.device_type = config['device_type']
+        self.location = config['location']
+        self.report_interval = config.get('report_interval', 30)  # 秒
+        self.error_rate = config.get('error_rate', 0.02)  # 2%エラー率
         
-        // デバイスタイプ別の特別なセンサー
-        if (this.deviceType === 'motion') {
-            states.motion = {
-                detected: false,
-                lastDetected: null
-            };
-        } else if (this.deviceType === 'gps') {
-            states.location = {
-                latitude: 35.6762 + (Math.random() - 0.5) * 0.1, // 東京周辺
-                longitude: 139.6503 + (Math.random() - 0.5) * 0.1,
-                altitude: Math.random() * 100,
-                speed: 0
-            };
+        # デバイス状態
+        self.is_online = False
+        self.battery_level = 100.0
+        self.firmware_version = '1.0.0'
+        self.last_seen = None
+        
+        # センサーデータ生成用
+        self.sensor_state = self.initialize_sensor_state()
+        
+        # MQTT設定
+        will_message = json.dumps({
+            'status': 'offline',
+            'timestamp': datetime.now().isoformat(),
+            'reason': 'unexpected_disconnect'
+        })
+        
+        self.client = mqtt.Client(
+            client_id=self.device_id,
+            clean_session=False  # セッション保持
+        )
+        
+        # Last Will Testament設定
+        self.client.will_set(
+            topic=f"devices/{self.device_id}/status",
+            payload=will_message,
+            qos=1,
+            retain=True
+        )
+        
+        self.setup_mqtt_handlers()
+        self.report_timer = None
+        self.running = False
+    
+    def initialize_sensor_state(self) -> Dict[str, Dict[str, Any]]:
+        """センサー状態の初期化"""
+        states = {
+            'temperature': {
+                'value': 20 + random.random() * 10,  # 20-30度
+                'trend': 0,
+                'noise': 0.5
+            },
+            'humidity': {
+                'value': 40 + random.random() * 20,  # 40-60%
+                'trend': 0,
+                'noise': 2
+            },
+            'pressure': {
+                'value': 1013 + random.random() * 20,  # 1013-1033 hPa
+                'trend': 0,
+                'noise': 1
+            }
         }
         
-        return states;
-    }
+        # デバイスタイプ別の特別なセンサー
+        if self.device_type == 'motion':
+            states['motion'] = {
+                'detected': False,
+                'last_detected': None
+            }
+        elif self.device_type == 'gps':
+            states['location'] = {
+                'latitude': 35.6762 + (random.random() - 0.5) * 0.1,  # 東京周辺
+                'longitude': 139.6503 + (random.random() - 0.5) * 0.1,
+                'altitude': random.random() * 100,
+                'speed': 0
+            }
+        
+        return states
     
-    setupMQTTHandlers() {
-        this.client.on('connect', () => {
-            this.isOnline = true;
-            this.lastSeen = new Date().toISOString();
+    def setup_mqtt_handlers(self):
+        """イベントハンドラーの設定"""
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
+        self.client.on_disconnect = self.on_disconnect
+    
+    def on_connect(self, client, userdata, flags, rc):
+        """接続時のコールバック"""
+        if rc == 0:
+            self.is_online = True
+            self.last_seen = datetime.now().isoformat()
             
-            console.log(chalk.green(`🟢 Device ${this.deviceId} connected`));
+            console.print(f"🟢 Device {self.device_id} connected", style="green")
             
-            // デバイス管理トピックを購読
-            this.subscribeToManagementTopics();
+            # デバイス管理トピックを購読
+            self.subscribe_to_management_topics()
             
-            // オンライン状態を報告
-            this.reportStatus('online');
+            # オンライン状態を報告
+            self.report_status('online')
             
-            // 定期報告開始
-            this.startPeriodicReporting();
-        });
+            # 定期報告開始
+            self.start_periodic_reporting()
+        else:
+            logger.error(f"Device {self.device_id} connection failed: {rc}")
+    
+    def on_message(self, client, userdata, msg):
+        """メッセージ受信時のコールバック"""
+        self.handle_command(msg.topic, msg.payload)
+    
+    def on_disconnect(self, client, userdata, rc):
+        """切断時のコールバック"""
+        if rc != 0:
+            console.print(f"🟡 Device {self.device_id} went offline unexpectedly", style="yellow")
+        self.is_online = False
+        self.stop_periodic_reporting()
+    
+    def subscribe_to_management_topics(self):
+        """デバイス管理トピックを購読"""
+        topics = [
+            f"devices/{self.device_id}/commands/+",
+            "devices/broadcast/+",
+            f"firmware/{self.device_type}/+"
+        ]
         
-        this.client.on('message', (topic, message) => {
-            this.handleCommand(topic, message);
-        });
+        for topic in topics:
+            self.client.subscribe(topic, qos=1)
+    
+    def handle_command(self, topic: str, message: bytes):
+        """コマンド処理"""
+        try:
+            command = json.loads(message.decode('utf-8'))
+            topic_parts = topic.split('/')
+            command_type = topic_parts[-1]
+            
+            console.print(f"📡 Device {self.device_id} received command: {command_type}", style="blue")
+            
+            if command_type == 'reboot':
+                self.handle_reboot(command)
+            elif command_type == 'update_interval':
+                self.handle_update_interval(command)
+            elif command_type == 'firmware_update':
+                asyncio.create_task(self.handle_firmware_update(command))
+            elif command_type == 'calibrate':
+                self.handle_calibrate(command)
+            else:
+                console.print(f"⚠️  Unknown command: {command_type}", style="yellow")
+                
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"Command parsing error: {e}")
+    
+    def handle_reboot(self, command: Dict[str, Any]):
+        """リブート処理"""
+        console.print(f"🔄 Device {self.device_id} rebooting...", style="yellow")
         
-        this.client.on('error', (error) => {
-            console.error(chalk.red(`❌ Device ${this.deviceId} error:`), error.message);
-        });
+        # オフライン状態を報告
+        self.report_status('rebooting')
         
-        this.client.on('offline', () => {
-            this.isOnline = false;
-            console.log(chalk.yellow(`🟡 Device ${this.deviceId} went offline`));
-            this.stopPeriodicReporting();
-        });
-    }
+        # 接続を一時的に切断
+        self.client.disconnect()
+        
+        # 3-10秒のランダムな再起動時間
+        reboot_time = 3 + random.random() * 7
+        
+        def reconnect():
+            time.sleep(reboot_time)
+            self.client.reconnect()
+            console.print(f"✅ Device {self.device_id} rebooted successfully", style="green")
+        
+        threading.Thread(target=reconnect, daemon=True).start()
+    
+    def handle_update_interval(self, command: Dict[str, Any]):
+        """レポート間隔更新処理"""
+        new_interval = command.get('interval', 30)
+        
+        if 5 <= new_interval <= 300:  # 5秒-5分の範囲
+            self.report_interval = new_interval
+            console.print(f"✅ Device {self.device_id} interval updated to {new_interval}s", style="green")
+            
+            # 定期報告を再開
+            self.stop_periodic_reporting()
+            self.start_periodic_reporting()
+            
+            # 確認応答
+            response = {
+                'success': True,
+                'new_interval': new_interval,
+                'timestamp': datetime.now().isoformat()
+            }
+            self.client.publish(
+                f"devices/{self.device_id}/responses/update_interval",
+                json.dumps(response),
+                qos=1
+            )
+        else:
+            console.print(f"❌ Invalid interval: {new_interval}s", style="red")
+    
+    async def handle_firmware_update(self, command: Dict[str, Any]):
+        """ファームウェア更新処理"""
+        console.print(f"📦 Device {self.device_id} starting firmware update...", style="blue")
+        
+        # ファームウェア更新シミュレーション
+        update_steps = [
+            'Downloading firmware',
+            'Verifying checksum',
+            'Backing up current firmware',
+            'Installing new firmware',
+            'Rebooting device'
+        ]
+        
+        for i, step in enumerate(update_steps):
+            progress = ((i + 1) / len(update_steps)) * 100
+            
+            console.print(f"📦 {step}... ({progress:.0f}%)", style="blue")
+            
+            # 進捗を報告
+            progress_data = {
+                'step': step,
+                'progress': progress,
+                'timestamp': datetime.now().isoformat()
+            }
+            self.client.publish(
+                f"devices/{self.device_id}/firmware_update_progress",
+                json.dumps(progress_data),
+                qos=1
+            )
+            
+            # 各ステップに時間をかける
+            await asyncio.sleep(2 + random.random() * 3)
+            
+            # 10%の確率で失敗シミュレーション
+            if random.random() < 0.1 and i == 3:
+                console.print(f"❌ Firmware update failed at step: {step}", style="red")
+                result = {
+                    'success': False,
+                    'error': f'Failed at: {step}',
+                    'timestamp': datetime.now().isoformat()
+                }
+                self.client.publish(
+                    f"devices/{self.device_id}/firmware_update_result",
+                    json.dumps(result),
+                    qos=1
+                )
+                return
+        
+        # 成功時
+        self.firmware_version = command.get('version', '1.1.0')
+        console.print(f"✅ Device {self.device_id} firmware updated to {self.firmware_version}", style="green")
+        
+        result = {
+            'success': True,
+            'old_version': '1.0.0',
+            'new_version': self.firmware_version,
+            'timestamp': datetime.now().isoformat()
+        }
+        self.client.publish(
+            f"devices/{self.device_id}/firmware_update_result",
+            json.dumps(result),
+            qos=1
+        )
+    
+    def handle_calibrate(self, command: Dict[str, Any]):
+        """センサー校正処理"""
+        console.print(f"🔧 Device {self.device_id} calibrating sensors...", style="blue")
+        
+        # センサーキャリブレーション
+        sensors = command.get('sensors', {})
+        for sensor_type in self.sensor_state.keys():
+            if sensor_type in sensors:
+                calibration = sensors[sensor_type]
+                if 'value' in self.sensor_state[sensor_type]:
+                    offset = calibration.get('offset', 0)
+                    self.sensor_state[sensor_type]['value'] += offset
+        
+        console.print(f"✅ Device {self.device_id} calibration completed", style="green")
+        
+        # 校正結果を報告
+        response = {
+            'success': True,
+            'calibrated_sensors': list(sensors.keys()),
+            'timestamp': datetime.now().isoformat()
+        }
+        self.client.publish(
+            f"devices/{self.device_id}/responses/calibrate",
+            json.dumps(response),
+            qos=1
+        )
+    
+    def start_periodic_reporting(self):
+        """定期レポート開始"""
+        if self.report_timer:
+            self.report_timer.cancel()
+        
+        def report_loop():
+            if self.running and self.is_online:
+                self.generate_and_send_sensor_data()
+                self.report_timer = threading.Timer(self.report_interval, report_loop)
+                self.report_timer.start()
+        
+        self.running = True
+        report_loop()
+    
+    def stop_periodic_reporting(self):
+        """定期レポート停止"""
+        self.running = False
+        if self.report_timer:
+            self.report_timer.cancel()
+            self.report_timer = None
+    
+    def generate_and_send_sensor_data(self):
+        """センサーデータ生成と送信"""
+        # バッテリー消耗シミュレーション
+        self.battery_level = max(0, self.battery_level - 0.01)
+        self.last_seen = datetime.now().isoformat()
+        
+        # エラー発生シミュレーション
+        if random.random() < self.error_rate:
+            self.send_error_report()
+            return
+        
+        # センサーデータ生成
+        sensor_data = self.generate_sensor_data()
+        
+        # データ送信
+        self.send_sensor_data(sensor_data)
+        
+        # 低バッテリー警告
+        if self.battery_level < 20:
+            self.send_low_battery_alert()
+    
+    def generate_sensor_data(self) -> Dict[str, Any]:
+        """センサーデータ生成"""
+        data = {
+            'device_id': self.device_id,
+            'device_type': self.device_type,
+            'location': self.location,
+            'timestamp': datetime.now().isoformat(),
+            'battery_level': round(self.battery_level, 2),
+            'firmware_version': self.firmware_version
+        }
+        
+        # 基本センサーデータの生成
+        for sensor_type in ['temperature', 'humidity', 'pressure']:
+            if sensor_type in self.sensor_state:
+                sensor = self.sensor_state[sensor_type]
+                
+                # トレンド変化
+                sensor['trend'] += (random.random() - 0.5) * 0.1
+                sensor['trend'] = max(-1, min(1, sensor['trend']))
+                
+                # 値の更新（トレンド + ノイズ）
+                sensor['value'] += sensor['trend'] + (random.random() - 0.5) * sensor['noise']
+                
+                # 範囲制限
+                if sensor_type == 'temperature':
+                    sensor['value'] = max(-10, min(50, sensor['value']))
+                elif sensor_type == 'humidity':
+                    sensor['value'] = max(0, min(100, sensor['value']))
+                elif sensor_type == 'pressure':
+                    sensor['value'] = max(980, min(1050, sensor['value']))
+                
+                data[sensor_type] = round(sensor['value'], 2)
+        
+        # デバイス固有のデータ
+        if self.device_type == 'motion':
+            motion_detected = random.random() < 0.1  # 10%の確率で動きを検知
+            data['motion_detected'] = motion_detected
+            if motion_detected:
+                self.sensor_state['motion']['last_detected'] = data['timestamp']
+                data['last_motion_time'] = data['timestamp']
+        elif self.device_type == 'gps':
+            location = self.sensor_state['location']
+            
+            # GPS位置の微小変動（歩行シミュレーション）
+            location['latitude'] += (random.random() - 0.5) * 0.0001
+            location['longitude'] += (random.random() - 0.5) * 0.0001
+            location['speed'] = random.random() * 5  # 0-5 km/h
+            
+            data['gps'] = {
+                'latitude': round(location['latitude'], 6),
+                'longitude': round(location['longitude'], 6),
+                'altitude': round(location['altitude'], 1),
+                'speed': round(location['speed'], 1)
+            }
+        
+        return data
+    
+    def send_sensor_data(self, data: Dict[str, Any]):
+        """センサーデータ送信"""
+        topic = f"sensors/{self.device_type}/{self.device_id}/data"
+        
+        try:
+            self.client.publish(topic, json.dumps(data), qos=1)
+            temp = data.get('temperature', 'N/A')
+            console.print(f"📊 Data sent from {self.device_id}: T:{temp}°C", style="dim")
+        except Exception as e:
+            logger.error(f"Failed to send data from {self.device_id}: {e}")
+    
+    def send_error_report(self):
+        """エラーレポート送信"""
+        error_types = [
+            'sensor_read_failed',
+            'low_battery',
+            'network_instability',
+            'memory_overflow',
+            'temperature_out_of_range'
+        ]
+        
+        error_report = {
+            'device_id': self.device_id,
+            'error_type': random.choice(error_types),
+            'timestamp': datetime.now().isoformat(),
+            'battery_level': self.battery_level,
+            'details': 'Error occurred during normal operation'
+        }
+        
+        self.client.publish(f"devices/{self.device_id}/errors", json.dumps(error_report), qos=1)
+        console.print(f"🚨 Error reported from {self.device_id}: {error_report['error_type']}", style="red")
+    
+    def send_low_battery_alert(self):
+        """低バッテリーアラート送信"""
+        alert = {
+            'device_id': self.device_id,
+            'alert_type': 'low_battery',
+            'battery_level': self.battery_level,
+            'timestamp': datetime.now().isoformat(),
+            'severity': 'critical' if self.battery_level < 10 else 'warning'
+        }
+        
+        self.client.publish(f"alerts/low_battery/{self.device_id}", json.dumps(alert), qos=1)
+        console.print(f"🪫 Low battery alert from {self.device_id}: {self.battery_level}%", style="yellow")
+    
+    def report_status(self, status: str):
+        """ステータス報告"""
+        status_report = {
+            'device_id': self.device_id,
+            'status': status,
+            'timestamp': datetime.now().isoformat(),
+            'battery_level': self.battery_level,
+            'firmware_version': self.firmware_version
+        }
+        
+        self.client.publish(
+            f"devices/{self.device_id}/status",
+            json.dumps(status_report),
+            qos=1,
+            retain=True
+        )
+    
+    def connect(self):
+        """ブローカーに接続"""
+        try:
+            self.client.connect('localhost', 1883, 60)
+            self.client.loop_start()
+            return True
+        except Exception as e:
+            logger.error(f"Connection failed for {self.device_id}: {e}")
+            return False
+    
+    def disconnect(self):
+        """デバイス切断"""
+        self.stop_periodic_reporting()
+        self.report_status('offline')
+        
+        time.sleep(1)
+        self.client.loop_stop()
+        self.client.disconnect()
+        console.print(f"👋 Device {self.device_id} disconnected", style="yellow")
+
+
+class IoTDeviceFarm:
+    """IoTデバイスファーム管理クラス"""
+    
+    def __init__(self):
+        self.devices: Dict[str, IoTDevice] = {}
+        self.is_running = False
+    
+    def create_device(self, config: Dict[str, Any]) -> IoTDevice:
+        """デバイス作成"""
+        device = IoTDevice(config)
+        self.devices[config['device_id']] = device
+        return device
+    
+    def create_device_farm(self, device_count: int):
+        """デバイスファーム作成"""
+        console.print(f"🏭 Creating IoT device farm with {device_count} devices", style="blue")
+        
+        device_types = ['temperature', 'motion', 'gps', 'environmental']
+        locations = ['Building-A', 'Building-B', 'Warehouse', 'Factory-Floor', 'Office']
+        
+        for i in range(device_count):
+            device_type = device_types[i % len(device_types)]
+            location = locations[i % len(locations)]
+            
+            config = {
+                'device_id': f"{device_type}-{str(i + 1).zfill(3)}",
+                'device_type': device_type,
+                'location': f"{location}-{i // len(locations) + 1}",
+                'report_interval': 20 + random.random() * 20,  # 20-40秒
+                'error_rate': 0.01 + random.random() * 0.02  # 1-3%
+            }
+            
+            device = self.create_device(config)
+            device.connect()
+        
+        console.print(f"✅ Created {len(self.devices)} IoT devices", style="green")
+    
+    def start(self):
+        """ファーム開始"""
+        self.is_running = True
+        console.print("🟢 IoT Device Farm started", style="green")
+    
+    def stop(self):
+        """ファーム停止"""
+        self.is_running = False
+        
+        console.print("🟡 Stopping all devices...", style="yellow")
+        
+        for device in self.devices.values():
+            device.disconnect()
+        
+        console.print("🔴 IoT Device Farm stopped", style="red")
+    
+    def get_device_stats(self) -> Dict[str, Any]:
+        """デバイス統計情報取得"""
+        stats = {
+            'total_devices': len(self.devices),
+            'online_devices': sum(1 for d in self.devices.values() if d.is_online),
+            'device_types': {},
+            'avg_battery': 0,
+            'low_battery_count': 0
+        }
+        
+        total_battery = 0
+        for device in self.devices.values():
+            # デバイスタイプ別カウント
+            device_type = device.device_type
+            if device_type not in stats['device_types']:
+                stats['device_types'][device_type] = 0
+            stats['device_types'][device_type] += 1
+            
+            # バッテリー統計
+            total_battery += device.battery_level
+            if device.battery_level < 20:
+                stats['low_battery_count'] += 1
+        
+        if len(self.devices) > 0:
+            stats['avg_battery'] = round(total_battery / len(self.devices), 1)
+        
+        return stats
+
+
+# 使用例
+def main():
+    """メイン関数"""
+    import signal
+    import sys
+    
+    # ファーム作成
+    farm = IoTDeviceFarm()
+    
+    def signal_handler(signum, frame):
+        console.print("\n⚠️  Received shutdown signal", style="yellow")
+        farm.stop()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        # 10台のデバイスでファーム作成
+        farm.create_device_farm(10)
+        farm.start()
+        
+        # シミュレーション実行
+        while True:
+            time.sleep(30)
+            stats = farm.get_device_stats()
+            console.print(f"\n📊 Farm Stats: {stats['online_devices']}/{stats['total_devices']} online, "
+                         f"Avg Battery: {stats['avg_battery']}%, Low: {stats['low_battery_count']}")
+            
+    except KeyboardInterrupt:
+        console.print("\n⚠️  Keyboard interrupt received", style="yellow")
+    finally:
+        farm.stop()
+
+if __name__ == "__main__":
+    main()
+```
     
     subscribeToManagementTopics() {
         const topics = [
@@ -511,162 +1009,428 @@ class IoTDevice {
     }
 }
 
-// デバイスファーム管理クラス
-class IoTDeviceFarm {
-    constructor() {
-        this.devices = new Map();
-        this.isRunning = false;
-    }
-    
-    createDevice(config) {
-        const device = new IoTDevice(config);
-        this.devices.set(config.deviceId, device);
-        return device;
-    }
-    
-    createDeviceFarm(farmConfig) {
-        console.log(chalk.blue(`🏭 Creating IoT device farm with ${farmConfig.deviceCount} devices`));
-        
-        const deviceTypes = ['temperature', 'motion', 'gps', 'environmental'];
-        const locations = ['Building-A', 'Building-B', 'Warehouse', 'Factory-Floor', 'Office'];
-        
-        for (let i = 0; i < farmConfig.deviceCount; i++) {
-            const deviceType = deviceTypes[i % deviceTypes.length];
-            const location = locations[i % locations.length];
-            
-            const config = {
-                deviceId: `${deviceType}-${String(i + 1).padStart(3, '0')}`,
-                deviceType: deviceType,
-                location: `${location}-${Math.floor(i / locations.length) + 1}`,
-                reportInterval: 20000 + Math.random() * 20000, // 20-40秒
-                errorRate: 0.01 + Math.random() * 0.02 // 1-3%
-            };
-            
-            this.createDevice(config);
-        }
-        
-        console.log(chalk.green(`✅ Created ${this.devices.size} IoT devices`));
-    }
-    
-    start() {
-        this.isRunning = true;
-        console.log(chalk.green('🟢 IoT Device Farm started'));
-        
-        // 定期的に状態を保存
-        this.stateInterval = setInterval(() => {
-            this.saveAllStates();
-        }, 60000); // 1分間隔
-    }
-    
-    stop() {
-        this.isRunning = false;
-        
-        if (this.stateInterval) {
-            clearInterval(this.stateInterval);
-        }
-        
-        console.log(chalk.yellow('🟡 Stopping all devices...'));
-        
-        Array.from(this.devices.values()).forEach(device => {
-            device.disconnect();
-        });
-        
-        console.log(chalk.red('🔴 IoT Device Farm stopped'));
-    }
-    
-    async saveAllStates() {
-        const savePromises = Array.from(this.devices.values()).map(device => 
-            device.saveState()
-        );
-        
-        try {
-            await Promise.all(savePromises);
-            console.log(chalk.gray(`💾 Saved states for ${this.devices.size} devices`));
-        } catch (error) {
-            console.error(chalk.red('❌ Failed to save device states:', error.message));
-        }
-    }
-    
-    getStatus() {
-        const onlineDevices = Array.from(this.devices.values()).filter(device => device.isOnline);
-        
-        return {
-            totalDevices: this.devices.size,
-            onlineDevices: onlineDevices.length,
-            offlineDevices: this.devices.size - onlineDevices.length,
-            isRunning: this.isRunning
-        };
-    }
-}
-
-// 実行部分
-if (require.main === module) {
-    const deviceFarm = new IoTDeviceFarm();
-    
-    // 設定
-    const farmConfig = {
-        deviceCount: parseInt(process.argv[2]) || 10
-    };
-    
-    // デバイスファームの作成と開始
-    deviceFarm.createDeviceFarm(farmConfig);
-    deviceFarm.start();
-    
-    // 終了処理
-    process.on('SIGINT', () => {
-        console.log(chalk.yellow('\n👋 Gracefully shutting down device farm...'));
-        deviceFarm.stop();
-        
-        setTimeout(() => {
-            process.exit(0);
-        }, 3000);
-    });
-    
-    // 定期的な状態表示
-    setInterval(() => {
-        const status = deviceFarm.getStatus();
-        console.log(chalk.blue(`📊 Farm Status: ${status.onlineDevices}/${status.totalDevices} devices online`));
-    }, 30000);
-}
-
-module.exports = { IoTDevice, IoTDeviceFarm };
 ```
 
 ### Exercise 2: デバイス管理アプリケーション
 
-`src/device-manager.js` を作成：
+`src/device_manager.py` を作成：
 
-```javascript
-const mqtt = require('mqtt');
-const chalk = require('chalk');
-const readline = require('readline');
+```python
+import paho.mqtt.client as mqtt
+import json
+import time
+import asyncio
+import threading
+from datetime import datetime
+from typing import Dict, List, Any, Optional
+from rich.console import Console
+from rich.table import Table
+from rich.live import Live
+from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.layout import Layout
 
-class IoTDeviceManager {
-    constructor() {
-        this.client = mqtt.connect('mqtt://localhost:1883', {
-            clientId: 'device-manager',
-            clean: true
-        });
-        
-        this.devices = new Map();
-        this.setupMQTTHandlers();
-        this.setupCLI();
-    }
+console = Console()
+
+class IoTDeviceManager:
+    """デバイス管理アプリケーション"""
     
-    setupMQTTHandlers() {
-        this.client.on('connect', () => {
-            console.log(chalk.green('🎛️  Device Manager connected'));
-            this.subscribeToDeviceTopics();
-        });
+    def __init__(self):
+        self.client = mqtt.Client(
+            client_id='device-manager',
+            clean_session=True
+        )
         
-        this.client.on('message', (topic, message) => {
-            this.handleDeviceMessage(topic, message);
-        });
-    }
+        self.devices: Dict[str, Dict[str, Any]] = {}
+        self.running = False
+        self.setup_mqtt_handlers()
     
-    subscribeToDeviceTopics() {
-        const topics = [
+    def setup_mqtt_handlers(self):
+        """イベントハンドラーの設定"""
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
+    
+    def on_connect(self, client, userdata, flags, rc):
+        """接続時のコールバック"""
+        if rc == 0:
+            console.print("🎛️  Device Manager connected", style="green")
+            self.subscribe_to_device_topics()
+    
+    def subscribe_to_device_topics(self):
+        """デバイストピックを購読"""
+        topics = [
             'devices/+/status',
+            'devices/+/errors',
+            'devices/+/responses/+',
+            'devices/+/firmware_update_progress',
+            'devices/+/firmware_update_result',
+            'sensors/+/+/data',
+            'alerts/+/+'
+        ]
+        
+        for topic in topics:
+            self.client.subscribe(topic, qos=1)
+            
+        console.print(f"Subscribed to {len(topics)} device monitoring topics")
+    
+    def on_message(self, client, userdata, msg):
+        """メッセージ受信時のコールバック"""
+        self.handle_device_message(msg.topic, msg.payload)
+    
+    def handle_device_message(self, topic: str, message: bytes):
+        """デバイスメッセージ処理"""
+        try:
+            data = json.loads(message.decode('utf-8'))
+            topic_parts = topic.split('/')
+            
+            # デバイスIDを取得
+            if len(topic_parts) >= 2:
+                if topic.startswith('devices/'):
+                    device_id = topic_parts[1]
+                elif topic.startswith('sensors/'):
+                    device_id = data.get('device_id', topic_parts[2]) if len(topic_parts) >= 3 else 'unknown'
+                elif topic.startswith('alerts/'):
+                    device_id = data.get('device_id', topic_parts[2]) if len(topic_parts) >= 3 else 'unknown'
+                else:
+                    return
+                
+                # デバイス情報更新
+                if device_id not in self.devices:
+                    self.devices[device_id] = {
+                        'device_id': device_id,
+                        'last_seen': datetime.now().isoformat(),
+                        'status': 'unknown',
+                        'message_count': 0,
+                        'errors': [],
+                        'last_data': None
+                    }
+                
+                device_info = self.devices[device_id]
+                device_info['last_seen'] = datetime.now().isoformat()
+                device_info['message_count'] += 1
+                
+                # メッセージタイプ別処理
+                if '/status' in topic:
+                    device_info['status'] = data.get('status', 'unknown')
+                    device_info['battery_level'] = data.get('battery_level', 0)
+                    device_info['firmware_version'] = data.get('firmware_version', 'unknown')
+                    
+                elif '/errors' in topic:
+                    error_info = {
+                        'timestamp': data.get('timestamp', datetime.now().isoformat()),
+                        'error_type': data.get('error_type', 'unknown'),
+                        'details': data.get('details', '')
+                    }
+                    device_info['errors'].append(error_info)
+                    
+                    # エラーリストを最大100件に制限
+                    if len(device_info['errors']) > 100:
+                        device_info['errors'] = device_info['errors'][-100:]
+                    
+                    console.print(f"🚨 Error from {device_id}: {error_info['error_type']}", style="red")
+                    
+                elif '/data' in topic:
+                    device_info['last_data'] = data
+                    device_info['device_type'] = data.get('device_type', 'unknown')
+                    device_info['location'] = data.get('location', 'unknown')
+                    
+                elif 'alerts/' in topic:
+                    console.print(f"🚨 Alert from {device_id}: {data.get('alert_type', 'unknown')}", style="yellow")
+                    
+        except (json.JSONDecodeError, KeyError) as e:
+            # 不正なメッセージは無視
+            pass
+    
+    def send_command_to_device(self, device_id: str, command_type: str, **kwargs):
+        """デバイスにコマンド送信"""
+        command = {
+            'timestamp': datetime.now().isoformat(),
+            'command_id': f"cmd_{int(time.time())}",
+            **kwargs
+        }
+        
+        topic = f"devices/{device_id}/commands/{command_type}"
+        
+        try:
+            self.client.publish(topic, json.dumps(command), qos=1)
+            console.print(f"📡 Sent {command_type} command to {device_id}", style="blue")
+            return True
+        except Exception as e:
+            console.print(f"❌ Failed to send command: {e}", style="red")
+            return False
+    
+    def send_broadcast_command(self, command_type: str, **kwargs):
+        """全デバイスにブロードキャストコマンド送信"""
+        command = {
+            'timestamp': datetime.now().isoformat(),
+            'command_id': f"broadcast_{int(time.time())}",
+            **kwargs
+        }
+        
+        topic = f"devices/broadcast/{command_type}"
+        
+        try:
+            self.client.publish(topic, json.dumps(command), qos=1)
+            console.print(f"📶 Broadcast {command_type} command sent", style="blue")
+            return True
+        except Exception as e:
+            console.print(f"❌ Failed to send broadcast: {e}", style="red")
+            return False
+    
+    def get_device_stats(self) -> Dict[str, Any]:
+        """デバイス統計情報取得"""
+        now = datetime.now()
+        online_devices = []
+        offline_devices = []
+        
+        for device_id, device_info in self.devices.items():
+            last_seen = datetime.fromisoformat(device_info['last_seen'])
+            time_diff = (now - last_seen).total_seconds()
+            
+            if time_diff < 120:  # 2分以内に通信があったらオンライン
+                online_devices.append(device_info)
+            else:
+                offline_devices.append(device_info)
+        
+        # デバイスタイプ別統計
+        device_types = {}
+        for device in online_devices:
+            device_type = device.get('device_type', 'unknown')
+            if device_type not in device_types:
+                device_types[device_type] = 0
+            device_types[device_type] += 1
+        
+        # エラー統計
+        total_errors = sum(len(device.get('errors', [])) for device in self.devices.values())
+        
+        return {
+            'total_devices': len(self.devices),
+            'online_devices': len(online_devices),
+            'offline_devices': len(offline_devices),
+            'device_types': device_types,
+            'total_errors': total_errors,
+            'total_messages': sum(device.get('message_count', 0) for device in self.devices.values())
+        }
+    
+    def create_status_table(self) -> Table:
+        """デバイスステータステーブル作成"""
+        table = Table(title="IoT Device Status")
+        table.add_column("Device ID", style="cyan", no_wrap=True)
+        table.add_column("Type", style="magenta")
+        table.add_column("Status", style="green")
+        table.add_column("Battery", style="yellow")
+        table.add_column("Firmware", style="blue")
+        table.add_column("Last Seen", style="dim")
+        table.add_column("Errors", style="red")
+        
+        now = datetime.now()
+        
+        for device_id, device_info in sorted(self.devices.items()):
+            last_seen = datetime.fromisoformat(device_info['last_seen'])
+            time_diff = (now - last_seen).total_seconds()
+            
+            # ステータスの色付け
+            if time_diff < 120:
+                status_style = "[green]●[/green]"
+            else:
+                status_style = "[red]●[/red]"
+            
+            # 最終通信時刻のフォーマット
+            if time_diff < 60:
+                last_seen_str = f"{int(time_diff)}s ago"
+            elif time_diff < 3600:
+                last_seen_str = f"{int(time_diff/60)}m ago"
+            else:
+                last_seen_str = f"{int(time_diff/3600)}h ago"
+            
+            battery_level = device_info.get('battery_level', 0)
+            battery_str = f"{battery_level:.1f}%" if battery_level > 0 else "N/A"
+            
+            error_count = len(device_info.get('errors', []))
+            
+            table.add_row(
+                device_id,
+                device_info.get('device_type', 'unknown'),
+                f"{status_style} {device_info.get('status', 'unknown')}",
+                battery_str,
+                device_info.get('firmware_version', 'unknown'),
+                last_seen_str,
+                str(error_count) if error_count > 0 else "-"
+            )
+        
+        return table
+    
+    def run_interactive_cli(self):
+        """インタラクティブCLI実行"""
+        console.print("🎛️  IoT Device Manager - Interactive Mode", style="bold green")
+        console.print("Type 'help' for available commands\n")
+        
+        while self.running:
+            try:
+                command = Prompt.ask("[bold blue]manager[/bold blue]", default="")
+                
+                if not command:
+                    continue
+                    
+                self.handle_cli_command(command)
+                    
+            except KeyboardInterrupt:
+                console.print("\n⚠️  Exiting...", style="yellow")
+                break
+            except Exception as e:
+                console.print(f"❌ CLI Error: {e}", style="red")
+    
+    def handle_cli_command(self, command: str):
+        """コマンド処理"""
+        parts = command.strip().split()
+        if not parts:
+            return
+        
+        cmd = parts[0].lower()
+        args = parts[1:]
+        
+        if cmd == 'help':
+            self.show_help()
+        elif cmd == 'status' or cmd == 'st':
+            console.print(self.create_status_table())
+        elif cmd == 'stats':
+            self.show_stats()
+        elif cmd == 'reboot':
+            if args:
+                device_id = args[0]
+                self.send_command_to_device(device_id, 'reboot')
+            else:
+                console.print("❌ Usage: reboot <device_id>", style="red")
+        elif cmd == 'interval':
+            if len(args) >= 2:
+                device_id, interval = args[0], int(args[1])
+                self.send_command_to_device(device_id, 'update_interval', interval=interval)
+            else:
+                console.print("❌ Usage: interval <device_id> <seconds>", style="red")
+        elif cmd == 'firmware':
+            if len(args) >= 2:
+                device_id, version = args[0], args[1]
+                self.send_command_to_device(device_id, 'firmware_update', version=version)
+            else:
+                console.print("❌ Usage: firmware <device_id> <version>", style="red")
+        elif cmd == 'broadcast':
+            if args:
+                command_type = args[0]
+                if command_type == 'reboot':
+                    self.send_broadcast_command('reboot')
+                elif command_type == 'interval' and len(args) >= 2:
+                    interval = int(args[1])
+                    self.send_broadcast_command('update_interval', interval=interval)
+                else:
+                    console.print("❌ Usage: broadcast [reboot|interval <seconds>]", style="red")
+            else:
+                console.print("❌ Usage: broadcast <command>", style="red")
+        elif cmd == 'errors':
+            if args:
+                device_id = args[0]
+                self.show_device_errors(device_id)
+            else:
+                console.print("❌ Usage: errors <device_id>", style="red")
+        elif cmd == 'clear':
+            console.clear()
+        elif cmd == 'quit' or cmd == 'exit':
+            self.running = False
+        else:
+            console.print(f"❌ Unknown command: {cmd}", style="red")
+    
+    def show_help(self):
+        """ヘルプ表示"""
+        help_text = """
+[bold blue]Available Commands:[/bold blue]
+
+[cyan]status (st)[/cyan]        - Show device status table
+[cyan]stats[/cyan]             - Show overall statistics
+[cyan]reboot <device_id>[/cyan] - Reboot specific device
+[cyan]interval <device_id> <sec>[/cyan] - Update report interval
+[cyan]firmware <device_id> <ver>[/cyan] - Update firmware
+[cyan]broadcast <cmd>[/cyan]   - Send broadcast command
+[cyan]errors <device_id>[/cyan] - Show device errors
+[cyan]clear[/cyan]             - Clear screen
+[cyan]help[/cyan]              - Show this help
+[cyan]quit/exit[/cyan]         - Exit manager
+        """
+        console.print(Panel(help_text, title="Help", border_style="blue"))
+    
+    def show_stats(self):
+        """統計情報表示"""
+        stats = self.get_device_stats()
+        
+        stats_text = f"""
+[green]Total Devices:[/green] {stats['total_devices']}
+[green]Online:[/green] {stats['online_devices']}
+[red]Offline:[/red] {stats['offline_devices']}
+[yellow]Total Messages:[/yellow] {stats['total_messages']}
+[red]Total Errors:[/red] {stats['total_errors']}
+
+[cyan]Device Types:[/cyan]
+        """
+        
+        for device_type, count in stats['device_types'].items():
+            stats_text += f"  {device_type}: {count}\n"
+        
+        console.print(Panel(stats_text, title="Statistics", border_style="green"))
+    
+    def show_device_errors(self, device_id: str):
+        """デバイスエラー表示"""
+        if device_id not in self.devices:
+            console.print(f"❌ Device {device_id} not found", style="red")
+            return
+        
+        errors = self.devices[device_id].get('errors', [])
+        if not errors:
+            console.print(f"No errors found for {device_id}", style="green")
+            return
+        
+        error_table = Table(title=f"Errors for {device_id}")
+        error_table.add_column("Time", style="dim")
+        error_table.add_column("Type", style="red")
+        error_table.add_column("Details", style="yellow")
+        
+        for error in errors[-20:]:  # 最新20件を表示
+            timestamp = error['timestamp'][:19].replace('T', ' ')
+            error_table.add_row(
+                timestamp,
+                error['error_type'],
+                error['details'][:50] + '...' if len(error['details']) > 50 else error['details']
+            )
+        
+        console.print(error_table)
+    
+    def start(self):
+        """マネージャー開始"""
+        try:
+            self.client.connect('localhost', 1883, 60)
+            self.client.loop_start()
+            time.sleep(2)  # 接続完了まで待機
+            
+            self.running = True
+            self.run_interactive_cli()
+            
+        except Exception as e:
+            console.print(f"❌ Failed to start device manager: {e}", style="red")
+        finally:
+            self.stop()
+    
+    def stop(self):
+        """マネージャー停止"""
+        self.running = False
+        self.client.loop_stop()
+        self.client.disconnect()
+        console.print("👋 Device Manager stopped", style="yellow")
+
+# 使用例
+def main():
+    """メイン関数"""
+    manager = IoTDeviceManager()
+    manager.start()
+
+if __name__ == "__main__":
+    main()
             'sensors/+/+/data', 
             'devices/+/errors',
             'alerts/+/+',

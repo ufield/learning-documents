@@ -182,187 +182,242 @@ import paho.mqtt.client as mqtt
 import json
 import time
 import threading
+import signal
+import sys
 from rich.console import Console
 from rich.panel import Panel
-from typing import Callable, Optional, List
+from typing import Callable, Optional, List, Dict, Any
+from datetime import datetime
 
 console = Console()
 
 class MQTTSubscriber:
+    """MQTT Subscriber クラス"""
+    
     def __init__(self, broker_url: str = 'localhost', port: int = 1883):
-        this.client = mqtt.connect(brokerUrl, {
-            clientId: `subscriber-${Date.now()}`,
-            clean: true
-        });
+        self.broker_url = broker_url
+        self.port = port
+        self.client = mqtt.Client(
+            client_id=f"subscriber-{int(time.time())}",
+            clean_session=True
+        )
         
-        this.subscriptions = new Map();
-        this.messageCount = 0;
+        self.subscriptions: Dict[str, Dict[str, Any]] = {}
+        self.message_count = 0
+        self.connected = threading.Event()
         
-        this.setupEventHandlers();
-    }
+        self.setup_event_handlers()
     
-    setupEventHandlers() {
-        this.client.on('connect', () => {
-            console.log(chalk.green('📡 Subscriber connected to broker'));
-        });
-        
-        this.client.on('message', (topic, message, packet) => {
-            this.handleMessage(topic, message, packet);
-        });
-        
-        this.client.on('error', (error) => {
-            console.error(chalk.red('❌ Subscriber error:'), error.message);
-        });
-        
-        this.client.on('subscribe', (granted) => {
-            console.log(chalk.green('✅ Successfully subscribed:'));
-            granted.forEach(sub => {
-                console.log(chalk.gray(`   Topic: ${sub.topic}, QoS: ${sub.qos}`));
-            });
-        });
-    }
+    def setup_event_handlers(self):
+        """イベントハンドラーの設定"""
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
+        self.client.on_subscribe = self.on_subscribe
+        self.client.on_unsubscribe = self.on_unsubscribe
+        self.client.on_disconnect = self.on_disconnect
     
-    handleMessage(topic, message, packet) {
-        this.messageCount++;
-        
-        console.log(chalk.cyan(`\n📬 Message received (#${this.messageCount})`));
-        console.log(chalk.blue(`   Topic: ${topic}`));
-        console.log(chalk.blue(`   QoS: ${packet.qos}`));
-        console.log(chalk.blue(`   Retain: ${packet.retain}`));
-        console.log(chalk.blue(`   Payload: ${message.toString()}`));
-        
-        // JSONメッセージの場合はパースして表示
-        try {
-            const jsonData = JSON.parse(message.toString());
-            console.log(chalk.magenta('   Parsed JSON:'));
-            console.log(chalk.gray(JSON.stringify(jsonData, null, 4)));
-        } catch (e) {
-            // JSON以外のメッセージの場合は無視
-        }
-        
-        // カスタム処理のデモ
-        this.processMessageByTopic(topic, message.toString());
-    }
+    def on_connect(self, client, userdata, flags, rc):
+        """接続時のコールバック"""
+        if rc == 0:
+            console.print("📡 Subscriber connected to broker", style="bold green")
+            self.connected.set()
+        else:
+            console.print(f"❌ Subscriber connection failed: {rc}", style="bold red")
     
-    processMessageByTopic(topic, message) {
-        if (topic.startsWith('sensors/temperature')) {
-            const temp = parseFloat(message);
-            if (temp > 30) {
-                console.log(chalk.red('🔥 High temperature alert!'));
-            } else if (temp < 10) {
-                console.log(chalk.blue('🧊 Low temperature alert!'));
-            }
-        } else if (topic.startsWith('alerts/')) {
-            console.log(chalk.yellow('⚠️  Alert received - escalating to monitoring system'));
-        }
-    }
+    def on_message(self, client, userdata, msg):
+        """メッセージ受信時のコールバック"""
+        self.handle_message(msg.topic, msg.payload, msg)
     
-    async subscribe(topic, options = {}) {
-        return new Promise((resolve, reject) => {
-            console.log(chalk.blue(`📥 Subscribing to topic: ${topic}`));
-            console.log(chalk.gray(`   QoS: ${options.qos || 0}`));
+    def on_subscribe(self, client, userdata, mid, granted_qos):
+        """購読成功時のコールバック"""
+        console.print("✅ Successfully subscribed:", style="green")
+        for qos in granted_qos:
+            console.print(f"   QoS: {qos}", style="dim")
+    
+    def on_unsubscribe(self, client, userdata, mid):
+        """購読解除時のコールバック"""
+        console.print("✅ Successfully unsubscribed", style="green")
+    
+    def on_disconnect(self, client, userdata, rc):
+        """切断時のコールバック"""
+        console.print(f"👋 Subscriber disconnected (received {self.message_count} messages)", style="yellow")
+        self.connected.clear()
+    
+    def handle_message(self, topic: str, payload: bytes, packet):
+        """メッセージ処理"""
+        self.message_count += 1
+        message_str = payload.decode('utf-8')
+        
+        console.print(f"\n📬 Message received (#{self.message_count})", style="bold cyan")
+        console.print(f"   Topic: {topic}", style="blue")
+        console.print(f"   QoS: {packet.qos}", style="blue")
+        console.print(f"   Retain: {packet.retain}", style="blue")
+        console.print(f"   Payload: {message_str}", style="blue")
+        
+        # JSONメッセージの場合はパースして表示
+        try:
+            json_data = json.loads(message_str)
+            console.print("   Parsed JSON:", style="magenta")
+            console.print(json.dumps(json_data, indent=4, ensure_ascii=False), style="dim")
+        except (json.JSONDecodeError, ValueError):
+            # JSON以外のメッセージの場合は無視
+            pass
+        
+        # カスタム処理のデモ
+        self.process_message_by_topic(topic, message_str)
+    
+    def process_message_by_topic(self, topic: str, message: str):
+        """トピック別メッセージ処理"""
+        if topic.startswith('sensors/temperature'):
+            try:
+                temp = float(message)
+                if temp > 30:
+                    console.print("🔥 High temperature alert!", style="bold red")
+                elif temp < 10:
+                    console.print("🧊 Low temperature alert!", style="bold blue")
+            except ValueError:
+                pass
+        elif topic.startswith('alerts/'):
+            console.print("⚠️  Alert received - escalating to monitoring system", style="bold yellow")
+    
+    def connect(self) -> bool:
+        """ブローカーに接続"""
+        try:
+            self.client.connect(self.broker_url, self.port, 60)
+            self.client.loop_start()
             
-            this.client.subscribe(topic, options, (error, granted) => {
-                if (error) {
-                    console.error(chalk.red('❌ Subscribe failed:'), error.message);
-                    reject(error);
-                } else {
-                    this.subscriptions.set(topic, options);
-                    resolve(granted);
-                }
-            });
-        });
-    }
+            # 接続完了を待機
+            if self.connected.wait(timeout=10):
+                return True
+            else:
+                console.print("❌ Connection timeout", style="bold red")
+                return False
+        except Exception as e:
+            console.print(f"❌ Connection error: {e}", style="bold red")
+            return False
     
-    async unsubscribe(topic) {
-        return new Promise((resolve, reject) => {
-            console.log(chalk.yellow(`📤 Unsubscribing from topic: ${topic}`));
-            
-            this.client.unsubscribe(topic, (error) => {
-                if (error) {
-                    console.error(chalk.red('❌ Unsubscribe failed:'), error.message);
-                    reject(error);
-                } else {
-                    this.subscriptions.delete(topic);
-                    console.log(chalk.green('✅ Successfully unsubscribed'));
-                    resolve();
-                }
-            });
-        });
-    }
+    def subscribe(self, topic: str, qos: int = 0) -> bool:
+        """トピックに購読"""
+        if not self.connected.is_set():
+            console.print("❌ Not connected to broker", style="bold red")
+            return False
+        
+        console.print(f"📥 Subscribing to topic: {topic}", style="bold blue")
+        console.print(f"   QoS: {qos}", style="dim")
+        
+        try:
+            result = self.client.subscribe(topic, qos)
+            if result[0] == mqtt.MQTT_ERR_SUCCESS:
+                self.subscriptions[topic] = {'qos': qos}
+                return True
+            else:
+                console.print(f"❌ Subscribe failed: {result[0]}", style="bold red")
+                return False
+        except Exception as e:
+            console.print(f"❌ Subscribe error: {e}", style="bold red")
+            return False
     
-    disconnect() {
-        this.client.end();
-        console.log(chalk.yellow(`👋 Subscriber disconnected (received ${this.messageCount} messages)`));
-    }
+    def unsubscribe(self, topic: str) -> bool:
+        """トピックの購読を解除"""
+        console.print(f"📤 Unsubscribing from topic: {topic}", style="yellow")
+        
+        try:
+            result = self.client.unsubscribe(topic)
+            if result[0] == mqtt.MQTT_ERR_SUCCESS:
+                if topic in self.subscriptions:
+                    del self.subscriptions[topic]
+                return True
+            else:
+                console.print(f"❌ Unsubscribe failed: {result[0]}", style="bold red")
+                return False
+        except Exception as e:
+            console.print(f"❌ Unsubscribe error: {e}", style="bold red")
+            return False
     
-    getStats() {
+    def disconnect(self):
+        """ブローカーから切断"""
+        if self.connected.is_set():
+            self.client.loop_stop()
+            self.client.disconnect()
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """統計情報を取得"""
         return {
-            messageCount: this.messageCount,
-            subscriptions: Array.from(this.subscriptions.keys())
-        };
-    }
-}
+            'message_count': self.message_count,
+            'subscriptions': list(self.subscriptions.keys())
+        }
 
-// 使用例
-async function demonstrateSubscribing() {
-    const subscriber = new MQTTSubscriber();
+# 使用例
+def demonstrate_subscribing():
+    """Subscriber動作デモ"""
+    subscriber = MQTTSubscriber()
     
-    // 接続完了まで少し待機
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    # シグナルハンドラーの設定
+    def signal_handler(signum, frame):
+        console.print("\n👋 Shutting down gracefully...", style="yellow")
+        subscriber.disconnect()
+        sys.exit(0)
     
-    try {
-        // 複数のトピックに購読
-        await subscriber.subscribe('sensors/temperature');
-        await subscriber.subscribe('sensors/data');
-        await subscriber.subscribe('alerts/+'); // ワイルドカード使用
-        await subscriber.subscribe('sensors/+/status', { qos: 1 });
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    # 接続
+    if not subscriber.connect():
+        console.print("❌ Failed to connect", style="bold red")
+        return
+    
+    # 接続完了まで少し待機
+    time.sleep(1)
+    
+    try:
+        # 複数のトピックに購読
+        subscriber.subscribe('sensors/temperature')
+        subscriber.subscribe('sensors/data')
+        subscriber.subscribe('alerts/+')  # ワイルドカード使用
+        subscriber.subscribe('sensors/+/status', qos=1)
         
-        console.log(chalk.green('\n🎧 Listening for messages... (Press Ctrl+C to stop)'));
+        console.print("\n🎧 Listening for messages... (Press Ctrl+C to stop)", style="bold green")
         
-        // 60秒間メッセージを待機
-        await new Promise(resolve => setTimeout(resolve, 60000));
+        # メッセージを待機（60秒間）
+        try:
+            time.sleep(60)
+        except KeyboardInterrupt:
+            pass
         
-    } catch (error) {
-        console.error('Subscribing failed:', error);
-    } finally {
-        const stats = subscriber.getStats();
-        console.log(chalk.cyan('\n📊 Session Statistics:'));
-        console.log(`   Messages received: ${stats.messageCount}`);
-        console.log(`   Subscriptions: ${stats.subscriptions.join(', ')}`);
+    except Exception as error:
+        console.print(f"Subscribing failed: {error}", style="bold red")
+    finally:
+        stats = subscriber.get_stats()
+        console.print("\n📊 Session Statistics:", style="cyan")
+        console.print(f"   Messages received: {stats['message_count']}")
+        console.print(f"   Subscriptions: {', '.join(stats['subscriptions'])}")
         
-        subscriber.disconnect();
-    }
-}
+        subscriber.disconnect()
 
-// Ctrl+Cでのクリーンアップ
-process.on('SIGINT', () => {
-    console.log(chalk.yellow('\n👋 Shutting down gracefully...'));
-    process.exit(0);
-});
-
-if (require.main === module) {
-    demonstrateSubscribing();
-}
-
-module.exports = MQTTSubscriber;
+if __name__ == "__main__":
+    demonstrate_subscribing()
 ```
 
 ### Exercise 2: ワイルドカードの実践
 
-`src/wildcard-demo.js` を作成：
+`src/wildcard_demo.py` を作成：
 
-```javascript
-const mqtt = require('mqtt');
-const chalk = require('chalk');
+```python
+import paho.mqtt.client as mqtt
+import time
+import random
+from rich.console import Console
+from typing import List, Dict
+from datetime import datetime
 
-class WildcardDemo {
-    constructor() {
-        this.client = mqtt.connect('mqtt://localhost:1883', {
-            clientId: 'wildcard-demo'
-        });
+console = Console()
+
+class WildcardDemo:
+    """MQTT ワイルドカードデモクラス"""
+    
+    def __init__(self):
+        self.client = mqtt.Client(client_id='wildcard-demo')
         
-        this.testTopics = [
+        self.test_topics = [
             'home/livingroom/temperature',
             'home/livingroom/humidity',
             'home/bedroom/temperature', 
@@ -372,403 +427,475 @@ class WildcardDemo {
             'office/room1/humidity',
             'factory/line1/sensor1/temperature',
             'factory/line1/sensor2/pressure'
-        ];
+        ]
         
-        this.setupEventHandlers();
-    }
+        self.setup_event_handlers()
     
-    setupEventHandlers() {
-        this.client.on('connect', () => {
-            console.log(chalk.green('📡 Wildcard demo client connected'));
-        });
-        
-        this.client.on('message', (topic, message, packet) => {
-            console.log(chalk.cyan(`📬 [${packet.qos}] ${topic}: ${message.toString()}`));
-        });
-    }
+    def setup_event_handlers(self):
+        """イベントハンドラーの設定"""
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
     
-    async demonstrateWildcards() {
-        console.log(chalk.yellow('🎯 MQTT Wildcard Demonstration\n'));
+    def on_connect(self, client, userdata, flags, rc):
+        """接続時のコールバック"""
+        if rc == 0:
+            console.print("📡 Wildcard demo client connected", style="bold green")
+    
+    def on_message(self, client, userdata, msg):
+        """メッセージ受信時のコールバック"""
+        topic = msg.topic
+        message = msg.payload.decode('utf-8')
+        qos = msg.qos
+        console.print(f"📬 [{qos}] {topic}: {message}", style="cyan")
+    
+    def connect(self) -> bool:
+        """ブローカーに接続"""
+        try:
+            self.client.connect('localhost', 1883, 60)
+            self.client.loop_start()
+            time.sleep(1)  # 接続完了まで待機
+            return True
+        except Exception as e:
+            console.print(f"❌ Connection error: {e}", style="bold red")
+            return False
+    
+    def publish(self, topic: str, message: str) -> bool:
+        """メッセージを公開"""
+        try:
+            result = self.client.publish(topic, message)
+            return result.rc == mqtt.MQTT_ERR_SUCCESS
+        except Exception as e:
+            console.print(f"❌ Publish error: {e}", style="bold red")
+            return False
+    
+    def demonstrate_wildcards(self):
+        """ワイルドカード実演"""
+        console.print("🎯 MQTT Wildcard Demonstration\n", style="bold yellow")
         
-        // テストデータの公開
-        console.log(chalk.blue('📤 Publishing test messages...'));
-        for (const topic of this.testTopics) {
-            const value = (Math.random() * 30 + 10).toFixed(1);
-            await this.publish(topic, value);
-        }
+        # テストデータの公開
+        console.print("📤 Publishing test messages...", style="blue")
+        for topic in self.test_topics:
+            value = f"{random.uniform(10, 40):.1f}"
+            self.publish(topic, value)
         
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        time.sleep(2)
         
-        // ワイルドカードパターンの実験
-        const wildcardPatterns = [
+        # ワイルドカードパターンの実験
+        wildcard_patterns = [
             {
-                pattern: 'home/+/temperature',
-                description: '家の全ての部屋の温度'
+                'pattern': 'home/+/temperature',
+                'description': '家の全ての部屋の温度'
             },
             {
-                pattern: 'home/livingroom/+', 
-                description: 'リビングルームの全てのセンサー'
+                'pattern': 'home/livingroom/+', 
+                'description': 'リビングルームの全てのセンサー'
             },
             {
-                pattern: '+/+/temperature',
-                description: '全ての建物の全ての部屋の温度'
+                'pattern': '+/+/temperature',
+                'description': '全ての建物の全ての部屋の温度'
             },
             {
-                pattern: 'factory/#',
-                description: '工場の全てのデータ'
+                'pattern': 'factory/#',
+                'description': '工場の全てのデータ'
             },
             {
-                pattern: '+/+/+',
-                description: '3階層のトピック全て'
+                'pattern': '+/+/+',
+                'description': '3階層のトピック全て'
             }
-        ];
+        ]
         
-        for (const pattern of wildcardPatterns) {
-            await this.demonstratePattern(pattern);
-            await new Promise(resolve => setTimeout(resolve, 3000));
-        }
-    }
+        for pattern_info in wildcard_patterns:
+            self.demonstrate_pattern(pattern_info)
+            time.sleep(3)
     
-    async demonstratePattern({ pattern, description }) {
-        console.log(chalk.yellow(`\n🔍 Testing pattern: ${pattern}`));
-        console.log(chalk.gray(`   Description: ${description}`));
+    def demonstrate_pattern(self, pattern_info: Dict[str, str]):
+        """特定パターンの実演"""
+        pattern = pattern_info['pattern']
+        description = pattern_info['description']
         
-        // パターンに購読
-        await new Promise((resolve, reject) => {
-            this.client.subscribe(pattern, (error) => {
-                if (error) reject(error);
-                else resolve();
-            });
-        });
+        console.print(f"\n🔍 Testing pattern: {pattern}", style="bold yellow")
+        console.print(f"   Description: {description}", style="dim")
         
-        console.log(chalk.green('✅ Subscribed. Publishing messages...'));
+        # パターンに購読
+        try:
+            result = self.client.subscribe(pattern)
+            if result[0] == mqtt.MQTT_ERR_SUCCESS:
+                console.print("✅ Subscribed. Publishing messages...", style="green")
+            else:
+                console.print(f"❌ Subscribe failed: {result[0]}", style="bold red")
+                return
+        except Exception as e:
+            console.print(f"❌ Subscribe error: {e}", style="bold red")
+            return
         
-        // マッチするメッセージを再公開
-        let matchCount = 0;
-        for (const topic of this.testTopics) {
-            if (this.topicMatches(topic, pattern)) {
-                matchCount++;
-                const value = (Math.random() * 30 + 10).toFixed(1);
-                await this.publish(topic, `${value} (matched)`);
-            }
-        }
+        # マッチするメッセージを再公開
+        match_count = 0
+        for topic in self.test_topics:
+            if self.topic_matches(topic, pattern):
+                match_count += 1
+                value = f"{random.uniform(10, 40):.1f}"
+                self.publish(topic, f"{value} (matched)")
         
-        console.log(chalk.blue(`📊 Pattern matched ${matchCount} topics`));
+        console.print(f"📊 Pattern matched {match_count} topics", style="blue")
         
-        // 購読解除
-        await new Promise((resolve) => {
-            this.client.unsubscribe(pattern, () => resolve());
-        });
+        # 少し待機してから購読解除
+        time.sleep(1)
         
-        console.log(chalk.gray('📤 Unsubscribed from pattern'));
-    }
+        # 購読解除
+        try:
+            result = self.client.unsubscribe(pattern)
+            if result[0] == mqtt.MQTT_ERR_SUCCESS:
+                console.print("📤 Unsubscribed from pattern", style="dim")
+        except Exception as e:
+            console.print(f"❌ Unsubscribe error: {e}", style="bold red")
     
-    topicMatches(topic, pattern) {
-        // シンプルなマッチング実装
-        const topicParts = topic.split('/');
-        const patternParts = pattern.split('/');
+    def topic_matches(self, topic: str, pattern: str) -> bool:
+        """トピックがパターンにマッチするかチェック"""
+        topic_parts = topic.split('/')
+        pattern_parts = pattern.split('/')
         
-        if (pattern.includes('#')) {
-            const hashIndex = patternParts.indexOf('#');
-            return topicParts.slice(0, hashIndex).every((part, i) => 
-                patternParts[i] === part || patternParts[i] === '+'
-            );
-        }
+        # マルチレベルワイルドカード (#) の処理
+        if '#' in pattern:
+            hash_index = pattern_parts.index('#')
+            # '#'より前の部分がマッチするかチェック
+            return all(
+                pattern_parts[i] == topic_parts[i] or pattern_parts[i] == '+'
+                for i in range(min(hash_index, len(topic_parts)))
+                if i < len(pattern_parts) and i < len(topic_parts)
+            )
         
-        if (topicParts.length !== patternParts.length) {
-            return false;
-        }
+        # 階層数が違う場合は不一致
+        if len(topic_parts) != len(pattern_parts):
+            return False
         
-        return topicParts.every((part, i) => 
-            patternParts[i] === part || patternParts[i] === '+'
-        );
-    }
+        # シングルレベルワイルドカード (+) の処理
+        return all(
+            pattern_parts[i] == topic_parts[i] or pattern_parts[i] == '+'
+            for i in range(len(topic_parts))
+        )
     
-    async publish(topic, message) {
-        return new Promise((resolve, reject) => {
-            this.client.publish(topic, message, (error) => {
-                if (error) reject(error);
-                else resolve();
-            });
-        });
-    }
-    
-    disconnect() {
-        this.client.end();
-        console.log(chalk.yellow('\n👋 Wildcard demo completed'));
-    }
-}
+    def disconnect(self):
+        """切断"""
+        self.client.loop_stop()
+        self.client.disconnect()
+        console.print("\n👋 Wildcard demo completed", style="yellow")
 
-// 実行
-async function main() {
-    const demo = new WildcardDemo();
+# 実行関数
+def main():
+    """メイン関数"""
+    demo = WildcardDemo()
     
-    // 接続完了まで待機
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    if not demo.connect():
+        console.print("❌ Failed to connect to broker", style="bold red")
+        return
     
-    try {
-        await demo.demonstrateWildcards();
-    } catch (error) {
-        console.error(chalk.red('Demo failed:'), error);
-    } finally {
-        demo.disconnect();
-    }
-}
+    try:
+        demo.demonstrate_wildcards()
+    except KeyboardInterrupt:
+        console.print("\n⚠️  Demo interrupted by user", style="yellow")
+    except Exception as error:
+        console.print(f"❌ Demo failed: {error}", style="bold red")
+    finally:
+        demo.disconnect()
 
-if (require.main === module) {
-    main();
-}
-
-module.exports = WildcardDemo;
+if __name__ == "__main__":
+    main()
 ```
 
 ### Exercise 3: チャットアプリケーション
 
-`src/chat-application.js` を作成：
+`src/chat_application.py` を作成：
 
-```javascript
-const mqtt = require('mqtt');
-const chalk = require('chalk');
-const readline = require('readline');
+```python
+import paho.mqtt.client as mqtt
+import json
+import sys
+import threading
+import signal
+from datetime import datetime
+from rich.console import Console
+from rich.prompt import Prompt
+from typing import Optional
 
-class MQTTChatApp {
-    constructor(username) {
-        this.username = username;
-        this.client = mqtt.connect('mqtt://localhost:1883', {
-            clientId: `chat-${username}-${Date.now()}`,
-            clean: true,
-            will: {
-                topic: 'chat/system',
-                payload: JSON.stringify({
-                    type: 'user_disconnect',
-                    username: username,
-                    timestamp: new Date().toISOString()
-                }),
-                qos: 1
+console = Console()
+
+class MQTTChatApp:
+    """MQTT チャットアプリケーション"""
+    
+    def __init__(self, username: str):
+        self.username = username
+        self.is_connected = False
+        self.running = True
+        
+        # Last Will Testament設定
+        will_message = json.dumps({
+            'type': 'user_disconnect',
+            'username': username,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        self.client = mqtt.Client(
+            client_id=f"chat-{username}-{int(datetime.now().timestamp())}",
+            clean_session=True
+        )
+        
+        # Last Will Testament設定
+        self.client.will_set(
+            topic='chat/system',
+            payload=will_message,
+            qos=1
+        )
+        
+        self.setup_mqtt_handlers()
+        self.setup_signal_handlers()
+    
+    def setup_mqtt_handlers(self):
+        """MQTTイベントハンドラーの設定"""
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
+        self.client.on_disconnect = self.on_disconnect
+    
+    def setup_signal_handlers(self):
+        """シグナルハンドラーの設定"""
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+    
+    def signal_handler(self, signum, frame):
+        """シグナルハンドラー"""
+        console.print("\n👋 Received exit signal. Leaving chat...", style="yellow")
+        self.quit()
+    
+    def on_connect(self, client, userdata, flags, rc):
+        """接続時のコールバック"""
+        if rc == 0:
+            self.is_connected = True
+            console.print(f"🎉 Welcome to MQTT Chat, {self.username}!", style="bold green")
+            console.print("💡 Commands: /help, /users, /quit", style="dim")
+            console.print("📝 Type your message and press Enter to send\n", style="dim")
+            
+            # チャットルームに参加
+            self.subscribe_to_chat()
+            self.announce_join()
+        else:
+            console.print(f"❌ Connection failed: {rc}", style="bold red")
+    
+    def on_message(self, client, userdata, msg):
+        """メッセージ受信時のコールバック"""
+        self.handle_message(msg.topic, msg.payload, msg)
+    
+    def on_disconnect(self, client, userdata, rc):
+        """切断時のコールバック"""
+        if rc != 0:
+            console.print("⚠️  Unexpected disconnect", style="yellow")
+        self.is_connected = False
+    
+    def subscribe_to_chat(self):
+        """チャットトピックに購読"""
+        try:
+            self.client.subscribe('chat/messages', qos=1)
+            self.client.subscribe('chat/system', qos=1)
+            self.client.subscribe(f'chat/private/{self.username}', qos=1)
+        except Exception as e:
+            console.print(f"Failed to subscribe to chat topics: {e}", style="bold red")
+    
+    def handle_message(self, topic: str, payload: bytes, packet):
+        """メッセージ処理"""
+        try:
+            data = json.loads(payload.decode('utf-8'))
+            
+            # 自分のメッセージは表示しない
+            if data.get('username') == self.username:
+                return
+            
+            if topic == 'chat/messages':
+                console.print(f"💬 {data['username']}: {data['message']}", style="cyan")
+            elif topic == 'chat/system':
+                self.handle_system_message(data)
+            elif topic.startswith('chat/private/'):
+                console.print(f"🔒 [Private] {data['username']}: {data['message']}", style="magenta")
+                
+        except (json.JSONDecodeError, KeyError) as e:
+            # JSON以外のメッセージまたは不正なフォーマットは無視
+            pass
+    
+    def handle_system_message(self, data: dict):
+        """システムメッセージ処理"""
+        msg_type = data.get('type')
+        username = data.get('username')
+        
+        if msg_type == 'user_join':
+            console.print(f"👋 {username} joined the chat", style="green")
+        elif msg_type == 'user_disconnect':
+            console.print(f"👋 {username} left the chat", style="yellow")
+        elif msg_type == 'user_list':
+            users = data.get('users', [])
+            console.print(f"👥 Online users: {', '.join(users)}", style="blue")
+    
+    def handle_command(self, command: str):
+        """コマンド処理"""
+        parts = command.split()
+        if not parts:
+            return
+            
+        cmd = parts[0].lower()
+        args = parts[1:]
+        
+        if cmd == '/help':
+            console.print("📖 Available commands:", style="blue")
+            console.print("  /help - Show this help")
+            console.print("  /users - List online users")
+            console.print("  /private <username> <message> - Send private message")
+            console.print("  /quit - Leave the chat")
+            
+        elif cmd == '/users':
+            self.request_user_list()
+            
+        elif cmd == '/private':
+            if len(args) < 2:
+                console.print("❌ Usage: /private <username> <message>", style="red")
+            else:
+                target_user = args[0]
+                message = ' '.join(args[1:])
+                self.send_private_message(target_user, message)
+                
+        elif cmd == '/quit':
+            self.quit()
+            
+        else:
+            console.print(f"❌ Unknown command: {cmd}", style="red")
+            console.print("💡 Type /help for available commands", style="dim")
+    
+    def send_message(self, message: str):
+        """パブリックメッセージ送信"""
+        message_data = {
+            'username': self.username,
+            'message': message,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        try:
+            self.client.publish('chat/messages', json.dumps(message_data), qos=1)
+        except Exception as e:
+            console.print(f"Failed to send message: {e}", style="bold red")
+    
+    def send_private_message(self, target_user: str, message: str):
+        """プライベートメッセージ送信"""
+        message_data = {
+            'username': self.username,
+            'message': message,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        try:
+            self.client.publish(f'chat/private/{target_user}', json.dumps(message_data), qos=1)
+            console.print(f"🔒 [Private to {target_user}]: {message}", style="magenta")
+        except Exception as e:
+            console.print(f"Failed to send private message: {e}", style="bold red")
+    
+    def announce_join(self):
+        """チャット参加を通知"""
+        join_data = {
+            'type': 'user_join',
+            'username': self.username,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        try:
+            self.client.publish('chat/system', json.dumps(join_data), qos=1)
+        except Exception as e:
+            console.print(f"Failed to announce join: {e}", style="bold red")
+    
+    def request_user_list(self):
+        """ユーザーリスト要求"""
+        # 実際のアプリケーションでは、サーバー側でユーザーリストを管理する必要があります
+        console.print("👥 User list functionality would require server-side implementation", style="dim")
+    
+    def run(self):
+        """チャットアプリケーション実行"""
+        try:
+            # MQTTブローカーに接続
+            self.client.connect('localhost', 1883, 60)
+            self.client.loop_start()
+            
+            # 接続完了まで待機
+            import time
+            time.sleep(2)
+            
+            if not self.is_connected:
+                console.print("❌ Failed to connect to MQTT broker", style="bold red")
+                return
+            
+            # メインループ
+            while self.running and self.is_connected:
+                try:
+                    user_input = Prompt.ask(f"[bold blue]{self.username}[/bold blue]", default="")
+                    
+                    if not user_input:
+                        continue
+                        
+                    if user_input.startswith('/'):
+                        self.handle_command(user_input)
+                    else:
+                        self.send_message(user_input)
+                        
+                except KeyboardInterrupt:
+                    console.print("\n👋 Keyboard interrupt received", style="yellow")
+                    break
+                except EOFError:
+                    break
+                    
+        except Exception as e:
+            console.print(f"❌ Chat error: {e}", style="bold red")
+        finally:
+            self.quit()
+    
+    def quit(self):
+        """チャット終了"""
+        if not self.running:
+            return
+            
+        self.running = False
+        console.print("\n👋 Leaving chat...", style="yellow")
+        
+        if self.is_connected:
+            # 切断通知送信
+            disconnect_data = {
+                'type': 'user_disconnect',
+                'username': self.username,
+                'timestamp': datetime.now().isoformat()
             }
-        });
-        
-        this.isConnected = false;
-        this.setupMQTTHandlers();
-        this.setupReadlineInterface();
-    }
-    
-    setupMQTTHandlers() {
-        this.client.on('connect', () => {
-            this.isConnected = true;
-            console.log(chalk.green(`🎉 Welcome to MQTT Chat, ${this.username}!`));
-            console.log(chalk.gray('💡 Commands: /help, /users, /quit'));
-            console.log(chalk.gray('📝 Type your message and press Enter to send\n'));
             
-            // チャットルームに参加
-            this.subscribeToChat();
-            this.announceJoin();
-        });
+            try:
+                self.client.publish('chat/system', json.dumps(disconnect_data), qos=1)
+            except:
+                pass  # エラーは無視
         
-        this.client.on('message', (topic, message, packet) => {
-            this.handleMessage(topic, message, packet);
-        });
+        # MQTT切断
+        self.client.loop_stop()
+        self.client.disconnect()
         
-        this.client.on('error', (error) => {
-            console.error(chalk.red('❌ Connection error:'), error.message);
-        });
-    }
-    
-    setupReadlineInterface() {
-        this.rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout,
-            prompt: chalk.blue(`${this.username}> `)
-        });
-        
-        this.rl.on('line', (input) => {
-            this.handleUserInput(input.trim());
-        });
-        
-        this.rl.on('SIGINT', () => {
-            this.quit();
-        });
-    }
-    
-    async subscribeToChat() {
-        try {
-            await this.subscribe('chat/messages', 1);
-            await this.subscribe('chat/system', 1);
-            await this.subscribe(`chat/private/${this.username}`, 1);
-            
-            this.rl.prompt();
-        } catch (error) {
-            console.error(chalk.red('Failed to subscribe to chat topics'));
-        }
-    }
-    
-    subscribe(topic, qos = 0) {
-        return new Promise((resolve, reject) => {
-            this.client.subscribe(topic, { qos }, (error) => {
-                if (error) reject(error);
-                else resolve();
-            });
-        });
-    }
-    
-    handleMessage(topic, message, packet) {
-        try {
-            const data = JSON.parse(message.toString());
-            
-            if (data.username === this.username) {
-                return; // 自分のメッセージは表示しない
-            }
-            
-            // プロンプトをクリア
-            readline.cursorTo(process.stdout, 0);
-            readline.clearLine(process.stdout, 0);
-            
-            if (topic === 'chat/messages') {
-                console.log(chalk.cyan(`💬 ${data.username}: ${data.message}`));
-            } else if (topic === 'chat/system') {
-                this.handleSystemMessage(data);
-            } else if (topic.startsWith('chat/private/')) {
-                console.log(chalk.magenta(`🔒 [Private] ${data.username}: ${data.message}`));
-            }
-            
-            this.rl.prompt();
-        } catch (error) {
-            // JSON以外のメッセージは無視
-        }
-    }
-    
-    handleSystemMessage(data) {
-        switch (data.type) {
-            case 'user_join':
-                console.log(chalk.green(`👋 ${data.username} joined the chat`));
-                break;
-            case 'user_disconnect':
-                console.log(chalk.yellow(`👋 ${data.username} left the chat`));
-                break;
-            case 'user_list':
-                console.log(chalk.blue(`👥 Online users: ${data.users.join(', ')}`));
-                break;
-        }
-    }
-    
-    handleUserInput(input) {
-        if (!this.isConnected) {
-            console.log(chalk.red('❌ Not connected to chat server'));
-            this.rl.prompt();
-            return;
-        }
-        
-        if (input.startsWith('/')) {
-            this.handleCommand(input);
-        } else if (input.length > 0) {
-            this.sendMessage(input);
-        }
-        
-        this.rl.prompt();
-    }
-    
-    handleCommand(command) {
-        const [cmd, ...args] = command.split(' ');
-        
-        switch (cmd.toLowerCase()) {
-            case '/help':
-                console.log(chalk.blue('📖 Available commands:'));
-                console.log('  /help - Show this help');
-                console.log('  /users - List online users');
-                console.log('  /private <username> <message> - Send private message');
-                console.log('  /quit - Leave the chat');
-                break;
-                
-            case '/users':
-                this.requestUserList();
-                break;
-                
-            case '/private':
-                if (args.length < 2) {
-                    console.log(chalk.red('❌ Usage: /private <username> <message>'));
-                } else {
-                    const [targetUser, ...messageParts] = args;
-                    this.sendPrivateMessage(targetUser, messageParts.join(' '));
-                }
-                break;
-                
-            case '/quit':
-                this.quit();
-                break;
-                
-            default:
-                console.log(chalk.red(`❌ Unknown command: ${cmd}`));
-                console.log(chalk.gray('💡 Type /help for available commands'));
-                break;
-        }
-    }
-    
-    sendMessage(message) {
-        const messageData = {
-            username: this.username,
-            message: message,
-            timestamp: new Date().toISOString()
-        };
-        
-        this.client.publish('chat/messages', JSON.stringify(messageData), { qos: 1 });
-    }
-    
-    sendPrivateMessage(targetUser, message) {
-        const messageData = {
-            username: this.username,
-            message: message,
-            timestamp: new Date().toISOString()
-        };
-        
-        this.client.publish(`chat/private/${targetUser}`, JSON.stringify(messageData), { qos: 1 });
-        console.log(chalk.magenta(`🔒 [Private to ${targetUser}]: ${message}`));
-    }
-    
-    announceJoin() {
-        const joinData = {
-            type: 'user_join',
-            username: this.username,
-            timestamp: new Date().toISOString()
-        };
-        
-        this.client.publish('chat/system', JSON.stringify(joinData), { qos: 1 });
-    }
-    
-    requestUserList() {
-        // 実際のアプリケーションでは、サーバー側でユーザーリストを管理する必要があります
-        console.log(chalk.gray('👥 User list functionality would require server-side implementation'));
-    }
-    
-    quit() {
-        console.log(chalk.yellow('\n👋 Leaving chat...'));
-        
-        if (this.isConnected) {
-            const disconnectData = {
-                type: 'user_disconnect',
-                username: this.username,
-                timestamp: new Date().toISOString()
-            };
-            
-            this.client.publish('chat/system', JSON.stringify(disconnectData), { qos: 1 });
-        }
-        
-        this.rl.close();
-        this.client.end();
-        process.exit(0);
-    }
-}
+        console.print("✨ Chat session ended", style="green")
+        sys.exit(0)
 
-// コマンドライン引数からユーザー名を取得
-const username = process.argv[2];
+def main():
+    """メイン関数"""
+    if len(sys.argv) != 2:
+        console.print("❌ Please provide a username", style="bold red")
+        console.print("Usage: python chat_application.py <username>", style="blue")
+        sys.exit(1)
+    
+    username = sys.argv[1]
+    
+    if not username or len(username.strip()) == 0:
+        console.print("❌ Username cannot be empty", style="bold red")
+        sys.exit(1)
+    
+    # チャットアプリケーション開始
+    chat_app = MQTTChatApp(username.strip())
+    chat_app.run()
 
-if (!username) {
-    console.log(chalk.red('❌ Please provide a username'));
-    console.log(chalk.blue('Usage: node chat-application.js <username>'));
-    process.exit(1);
-}
-
-// チャットアプリケーション開始
-new MQTTChatApp(username);
+if __name__ == "__main__":
+    main()
 ```
 
 ## 🎯 練習問題
@@ -778,11 +905,11 @@ new MQTTChatApp(username);
 2. 様々なトピックとメッセージでやり取りを確認してください
 
 ### 問題2: ワイルドカードの理解
-1. `wildcard-demo.js`を実行して、各パターンの動作を確認してください
+1. `wildcard_demo.py`を実行して、各パターンの動作を確認してください
 2. 独自のワイルドカードパターンを作成してテストしてください
 
 ### 問題3: チャットアプリケーション
-1. 複数のターミナルで異なるユーザー名でチャットアプリを起動してください
+1. 複数のターミナルで異なるユーザー名でチャットアプリを起動してください（`python chat_application.py <username>`）
 2. メッセージのやり取りと各種コマンドを試してください
 3. プライベートメッセージ機能を確認してください
 
