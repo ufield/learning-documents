@@ -254,19 +254,19 @@ Publisher                    Broker                    Subscriber
 
 MQTT 5.0では、メッセージにプロパティを追加できます：
 
-```javascript
-// Session Expiry Interval
-client.publish('topic', 'message', {
-    properties: {
-        sessionExpiryInterval: 3600, // 1時間
-        messageExpiryInterval: 300,  // 5分
-        topicAlias: 1,              // トピックエイリアス
-        userProperties: {
-            'source': 'sensor001',
-            'location': 'warehouse-A'
-        }
-    }
-});
+```python
+import paho.mqtt.client as mqtt
+import paho.mqtt.properties as properties
+
+# Session Expiry Interval
+client = mqtt.Client(protocol=mqtt.MQTTv5)
+props = properties.Properties(properties.PacketTypes.PUBLISH)
+props.SessionExpiryInterval = 3600  # 1時間
+props.MessageExpiryInterval = 300   # 5分
+props.TopicAlias = 1               # トピックエイリアス
+props.UserProperty = [('source', 'sensor001'), ('location', 'warehouse-A')]
+
+client.publish('topic', 'message', properties=props)
 ```
 
 ### 3.5.2 Reason Codes（理由コード）
@@ -291,86 +291,133 @@ MQTT 5.0では、詳細な理由コードが提供されます：
 
 ### 3.5.3 Topic Alias（トピックエイリアス）
 
-```javascript
-// 最初のPublish（トピック名とエイリアスを送信）
-client.publish('very/long/topic/name/with/many/levels', 'message1', {
-    properties: { topicAlias: 42 }
-});
+```python
+import paho.mqtt.client as mqtt
+import paho.mqtt.properties as properties
 
-// 以降のPublish（エイリアスのみ使用、帯域幅節約）
-client.publish('', 'message2', {
-    properties: { topicAlias: 42 }
-});
+client = mqtt.Client(protocol=mqtt.MQTTv5)
+client.connect("broker.example.com", 1883)
+
+# 最初のPublish（トピック名とエイリアスを送信）
+props1 = properties.Properties(properties.PacketTypes.PUBLISH)
+props1.TopicAlias = 42
+client.publish('very/long/topic/name/with/many/levels', 'message1', properties=props1)
+
+# 以降のPublish（エイリアスのみ使用、帯域幅節約）
+props2 = properties.Properties(properties.PacketTypes.PUBLISH)
+props2.TopicAlias = 42
+client.publish('', 'message2', properties=props2)
 ```
 
 ### 3.5.4 Shared Subscriptions（共有サブスクリプション）
 
-```javascript
-// 従来の方法：全てのサブスクライバーがメッセージを受信
-client1.subscribe('sensor/data');
-client2.subscribe('sensor/data');
-client3.subscribe('sensor/data');
-// 3つのクライアント全てが同じメッセージを受信
+```python
+import paho.mqtt.client as mqtt
 
-// MQTT 5.0の共有サブスクリプション：負荷分散
-client1.subscribe('$share/workers/sensor/data');
-client2.subscribe('$share/workers/sensor/data'); 
-client3.subscribe('$share/workers/sensor/data');
-// 1つのクライアントのみがメッセージを受信（ラウンドロビン）
+# 従来の方法：全てのサブスクライバーがメッセージを受信
+client1 = mqtt.Client(protocol=mqtt.MQTTv5)
+client2 = mqtt.Client(protocol=mqtt.MQTTv5) 
+client3 = mqtt.Client(protocol=mqtt.MQTTv5)
+
+client1.subscribe('sensor/data')
+client2.subscribe('sensor/data')
+client3.subscribe('sensor/data')
+# 3つのクライアント全てが同じメッセージを受信
+
+# MQTT 5.0の共有サブスクリプション：負荷分散
+client1.subscribe('$share/workers/sensor/data')
+client2.subscribe('$share/workers/sensor/data')
+client3.subscribe('$share/workers/sensor/data')
+# 1つのクライアントのみがメッセージを受信（ラウンドロビン）
 ```
 
 ## 3.6 パフォーマンス考慮事項
 
 ### 3.6.1 メッセージサイズ最適化
 
-```javascript
-// 非効率：JSONでの送信
-const inefficient = JSON.stringify({
-    timestamp: 1638360000000,
-    temperature: 23.5,
-    humidity: 45.2,
-    pressure: 1013.25
-});
-// サイズ: ~75バイト
+```python
+import json
+import struct
 
-// 効率的：バイナリでの送信
-const efficient = Buffer.alloc(20);
-efficient.writeUInt32BE(1638360000, 0);  // timestamp
-efficient.writeFloatBE(23.5, 4);        // temperature  
-efficient.writeFloatBE(45.2, 8);        // humidity
-efficient.writeFloatBE(1013.25, 12);    // pressure
-// サイズ: 20バイト
+# 非効率：JSONでの送信
+inefficient = json.dumps({
+    'timestamp': 1638360000000,
+    'temperature': 23.5,
+    'humidity': 45.2,
+    'pressure': 1013.25
+})
+# サイズ: ~75バイト
+
+# 効率的：バイナリでの送信
+# struct format: '>I' = big-endian unsigned int, '>f' = big-endian float
+efficient = struct.pack('>Ifff', 
+                       1638360000,  # timestamp (4 bytes)
+                       23.5,        # temperature (4 bytes)
+                       45.2,        # humidity (4 bytes)
+                       1013.25)     # pressure (4 bytes)
+# サイズ: 16バイト
+
+# バイナリデータの復号
+timestamp, temp, humidity, pressure = struct.unpack('>Ifff', efficient)
+print(f"Temperature: {temp}°C, Humidity: {humidity}%, Pressure: {pressure}hPa")
 ```
 
 ### 3.6.2 接続プール管理
 
-```javascript
-class MQTTConnectionPool {
-    constructor(brokerUrl, poolSize = 5) {
-        this.brokerUrl = brokerUrl;
-        this.poolSize = poolSize;
-        this.connections = [];
-        this.currentIndex = 0;
-    }
+```python
+import paho.mqtt.client as mqtt
+import time
+import threading
+from typing import List
+
+class MQTTConnectionPool:
+    def __init__(self, broker_url: str, port: int = 1883, pool_size: int = 5):
+        self.broker_url = broker_url
+        self.port = port
+        self.pool_size = pool_size
+        self.connections: List[mqtt.Client] = []
+        self.current_index = 0
+        self.lock = threading.Lock()
     
-    async initialize() {
-        for (let i = 0; i < this.poolSize; i++) {
-            const client = mqtt.connect(this.brokerUrl, {
-                clientId: `pool_client_${i}_${Date.now()}`
-            });
-            await new Promise((resolve) => {
-                client.on('connect', resolve);
-            });
-            this.connections.push(client);
-        }
-    }
+    def initialize(self):
+        """接続プールを初期化"""
+        for i in range(self.pool_size):
+            client = mqtt.Client(
+                client_id=f"pool_client_{i}_{int(time.time())}"
+            )
+            
+            # 接続完了を待つためのイベント
+            connected = threading.Event()
+            
+            def on_connect(client, userdata, flags, rc):
+                if rc == 0:
+                    connected.set()
+            
+            client.on_connect = on_connect
+            client.connect(self.broker_url, self.port, 60)
+            client.loop_start()
+            
+            # 接続完了まで待機
+            if connected.wait(timeout=10):
+                self.connections.append(client)
+            else:
+                print(f"Failed to connect client {i}")
     
-    getConnection() {
-        const conn = this.connections[this.currentIndex];
-        this.currentIndex = (this.currentIndex + 1) % this.poolSize;
-        return conn;
-    }
-}
+    def get_connection(self) -> mqtt.Client:
+        """ラウンドロビンで接続を取得"""
+        with self.lock:
+            conn = self.connections[self.current_index]
+            self.current_index = (self.current_index + 1) % len(self.connections)
+            return conn
+
+# 使用例
+pool = MQTTConnectionPool("localhost", 1883, 5)
+pool.initialize()
+
+# 接続をプールから取得して使用
+client = pool.get_connection()
+client.publish("test/topic", "Hello from pooled connection!")
+```
 ```
 
 ## 3.7 デバッグとトラブルシューティング
@@ -399,26 +446,28 @@ mqtt.conack.return_code != 0
 ### 3.7.2 一般的な問題と解決策
 
 **問題1: 接続が頻繁に切断される**
-```
-原因: Keep Aliveの設定不備
-解決: Keep Alive値を適切に設定
+```python
+# 原因: Keep Aliveの設定不備
+# 解決: Keep Alive値を適切に設定
 
-client.connect('mqtt://broker.example.com', {
-    keepalive: 60,  // 60秒間隔
-    reschedulePings: false
-});
+import paho.mqtt.client as mqtt
+
+client = mqtt.Client()
+client.connect("broker.example.com", 1883, keepalive=60)  # 60秒間隔
+client.loop_forever()
 ```
 
 **問題2: メッセージが受信されない**
-```
-原因: QoS設定やセッション管理の問題
-解決: Clean Sessionと適切なQoS使用
+```python
+# 原因: QoS設定やセッション管理の問題
+# 解決: Clean Sessionと適切なQoS使用
 
-client.connect('mqtt://broker.example.com', {
-    clean: false,  // セッション保持
-});
+import paho.mqtt.client as mqtt
 
-client.subscribe('topic', { qos: 1 });
+client = mqtt.Client(clean_session=False)  # セッション保持
+client.connect("broker.example.com", 1883)
+client.subscribe("topic", qos=1)
+client.loop_forever()
 ```
 
 ## 参考リンク

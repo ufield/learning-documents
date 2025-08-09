@@ -25,15 +25,19 @@ Client                    Broker                    Subscriber
 - **重複**: なし
 
 **実装例:**
-```javascript
-// QoS 0での送信
-client.publish('sensors/temperature', '23.5', { qos: 0 }, (err) => {
-    if (err) {
-        console.log('Publish failed (but no retry)');
-    } else {
-        console.log('Message sent (no guarantee)');
-    }
-});
+```python
+# QoS 0での送信
+import paho.mqtt.client as mqtt
+
+client = mqtt.Client()
+client.connect("broker.example.com", 1883, 60)
+
+# QoS 0での送信（最も簡単）
+result = client.publish('sensors/temperature', '23.5', qos=0)
+if result.rc == mqtt.MQTT_ERR_SUCCESS:
+    print('Message sent (no guarantee)')
+else:
+    print('Publish failed (but no retry)')
 ```
 
 **適用シナリオ:**
@@ -62,22 +66,30 @@ Client                    Broker                    Subscriber
 - **重複**: 可能性あり（ネットワーク問題時）
 - **再送**: 自動的に実行
 
-**実装例（JavaScript）:**
-```javascript
-client.publish('alerts/fire', JSON.stringify({
-    location: 'Building A',
-    severity: 'high',
-    timestamp: Date.now()
-}), { qos: 1 }, (err) => {
-    if (err) {
-        console.log('Alert failed to send');
-    } else {
-        console.log('Alert confirmed sent');
-    }
-});
-```
+**実装例（Python推奨）:**
+```python
+import paho.mqtt.client as mqtt
+import json
+import time
 
-**実装例（Python）:**
+def on_publish(client, userdata, mid):
+    print(f"Alert {mid} confirmed sent")
+
+client = mqtt.Client()
+client.on_publish = on_publish
+client.connect("broker.example.com", 1883, 60)
+
+# QoS 1でのアラート送信
+alert_data = {
+    'location': 'Building A',
+    'severity': 'high', 
+    'timestamp': int(time.time() * 1000)
+}
+
+result = client.publish('alerts/fire', json.dumps(alert_data), qos=1)
+result.wait_for_publish()  # 送信完了まで待機
+
+**実装例:**
 ```python
 import paho.mqtt.client as mqtt
 import json
@@ -110,54 +122,82 @@ result.wait_for_publish()
 ```
 
 **重複処理の実装:**
-```javascript
-class DeduplicatedMQTTHandler {
-    constructor() {
-        this.processedMessages = new Map();
-        this.cleanupInterval = 60000; // 1分間隔でクリーンアップ
+```python
+import json
+import time
+import hashlib
+import threading
+from typing import Dict, Any
+
+class DeduplicatedMQTTHandler:
+    def __init__(self):
+        self.processed_messages: Dict[str, float] = {}
+        self.cleanup_interval = 60  # 1分間隔でクリーンアップ
+        self.lock = threading.Lock()
         
-        setInterval(() => this.cleanup(), this.cleanupInterval);
-    }
+        # 定期的なクリーンアップを開始
+        self.start_cleanup_timer()
     
-    handleMessage(topic, message) {
-        const messageData = JSON.parse(message.toString());
-        const messageId = messageData.id || this.generateHash(message);
-        const now = Date.now();
+    def handle_message(self, topic: str, message: bytes):
+        try:
+            message_data = json.loads(message.decode())
+            message_id = message_data.get('id') or self.generate_hash(message)
+            now = time.time()
+            
+            with self.lock:
+                # 重複チェック
+                if message_id in self.processed_messages:
+                    print(f"Duplicate message ignored: {message_id}")
+                    return
+                
+                # 処理済みとしてマーク
+                self.processed_messages[message_id] = now
+            
+            # メッセージ処理
+            self.process_message(topic, message_data)
+            
+        except json.JSONDecodeError:
+            print(f"Invalid JSON message on {topic}")
+        except Exception as e:
+            print(f"Error processing message: {e}")
+    
+    def process_message(self, topic: str, data: Dict[str, Any]):
+        print(f"Processing unique message on {topic}: {data}")
+        # 実際のビジネスロジックをここに実装
+    
+    def cleanup(self):
+        cutoff = time.time() - (5 * 60)  # 5分前
+        with self.lock:
+            expired_ids = [mid for mid, timestamp in self.processed_messages.items() 
+                          if timestamp < cutoff]
+            for mid in expired_ids:
+                del self.processed_messages[mid]
         
-        // 重複チェック
-        if (this.processedMessages.has(messageId)) {
-            console.log(`Duplicate message ignored: ${messageId}`);
-            return;
-        }
+        print(f"Cleaned up {len(expired_ids)} expired message IDs")
+    
+    def generate_hash(self, message: bytes) -> str:
+        return hashlib.md5(message).hexdigest()
+    
+    def start_cleanup_timer(self):
+        def cleanup_loop():
+            while True:
+                time.sleep(self.cleanup_interval)
+                self.cleanup()
         
-        // メッセージ処理
-        this.processMessage(topic, messageData);
-        
-        // 処理済みとしてマーク
-        this.processedMessages.set(messageId, now);
-    }
-    
-    processMessage(topic, data) {
-        console.log(`Processing unique message on ${topic}:`, data);
-        // 実際のビジネスロジック
-    }
-    
-    cleanup() {
-        const cutoff = Date.now() - (5 * 60 * 1000); // 5分前
-        for (const [id, timestamp] of this.processedMessages.entries()) {
-            if (timestamp < cutoff) {
-                this.processedMessages.delete(id);
-            }
-        }
-    }
-    
-    generateHash(message) {
-        return require('crypto')
-            .createHash('md5')
-            .update(message)
-            .digest('hex');
-    }
-}
+        cleanup_thread = threading.Thread(target=cleanup_loop, daemon=True)
+        cleanup_thread.start()
+
+# 使用例
+def on_message(client, userdata, msg):
+    handler = userdata['handler']
+    handler.handle_message(msg.topic, msg.payload)
+
+handler = DeduplicatedMQTTHandler()
+client = mqtt.Client(userdata={'handler': handler})
+client.on_message = on_message
+client.connect("broker.example.com", 1883, 60)
+client.subscribe("alerts/+", qos=1)
+client.loop_forever()
 ```
 
 ### 5.1.3 QoS Level 2: Exactly once
@@ -184,20 +224,44 @@ Client                    Broker                    Subscriber
 - **処理時間**: 最長
 
 **実装例:**
-```javascript
-// 重要な制御コマンド送信
-client.publish('actuators/valve/control', JSON.stringify({
-    command: 'close',
-    valve_id: 'V001',
-    user_id: 'operator123',
-    timestamp: Date.now()
-}), { qos: 2 }, (err) => {
-    if (err) {
-        console.error('Critical command failed');
-    } else {
-        console.log('Command confirmed delivered exactly once');
-    }
-});
+```python
+# 重要な制御コマンド送信
+import paho.mqtt.client as mqtt
+import json
+import time
+
+def on_publish(client, userdata, mid):
+    print('Command confirmed delivered exactly once')
+
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Connected to broker")
+
+client = mqtt.Client()
+client.on_publish = on_publish
+client.on_connect = on_connect
+client.connect("broker.example.com", 1883, 60)
+
+# QoS 2での重要な制御コマンド送信
+command_data = {
+    'command': 'close',
+    'valve_id': 'V001', 
+    'user_id': 'operator123',
+    'timestamp': int(time.time() * 1000)
+}
+
+result = client.publish(
+    'actuators/valve/control', 
+    json.dumps(command_data), 
+    qos=2
+)
+
+# QoS 2の完全なハンドシェイクを待機
+if result.rc == mqtt.MQTT_ERR_SUCCESS:
+    result.wait_for_publish()
+    print("Critical command sent with QoS 2 guarantee")
+else:
+    print("Critical command failed")
 ```
 
 **QoS 2状態管理:**
@@ -264,20 +328,24 @@ class QoS2StateManager:
 
 ### 5.3.1 Clean Session vs Persistent Session
 
-```javascript
-// Clean Session = true（デフォルト）
-const clientClean = mqtt.connect('mqtt://broker.example.com', {
-    clean: true,
-    clientId: 'device001'
-});
-// 接続終了時に全てのセッション情報が破棄される
+```python
+# Clean Session = True（デフォルト）
+import paho.mqtt.client as mqtt
 
-// Persistent Session
-const clientPersistent = mqtt.connect('mqtt://broker.example.com', {
-    clean: false,
-    clientId: 'device001' // 同じclientIdが重要
-});
-// セッション情報が保持される
+client_clean = mqtt.Client(
+    client_id='device001',
+    clean_session=True
+)
+client_clean.connect('broker.example.com', 1883, 60)
+# 接続終了時に全てのセッション情報が破棄される
+
+# Persistent Session
+client_persistent = mqtt.Client(
+    client_id='device001',  # 同じclient_idが重要
+    clean_session=False
+)
+client_persistent.connect('broker.example.com', 1883, 60)
+# セッション情報が保持される
 ```
 
 **Persistent Sessionで保持される情報:**
@@ -288,14 +356,21 @@ const clientPersistent = mqtt.connect('mqtt://broker.example.com', {
 
 ### 5.3.2 MQTT 5.0のSession Expiry
 
-```javascript
-// MQTT 5.0のより柔軟なセッション管理
-const client = mqtt.connect('mqtt://broker.example.com', {
-    protocolVersion: 5,
-    clean: false,
-    sessionExpiryInterval: 3600, // 1時間後にセッション期限切れ
-    clientId: 'device001'
-});
+```python
+# MQTT 5.0のより柔軟なセッション管理
+import paho.mqtt.client as mqtt
+import paho.mqtt.properties as properties
+
+client = mqtt.Client(
+    client_id='device001',
+    protocol=mqtt.MQTTv5
+)
+
+# 接続プロパティの設定
+connect_properties = properties.Properties(properties.PacketTypes.CONNECT)
+connect_properties.SessionExpiryInterval = 3600  # 1時間後にセッション期限切れ
+
+client.connect('broker.example.com', 1883, 60, properties=connect_properties)
 ```
 
 **セッション期限切れの動作:**

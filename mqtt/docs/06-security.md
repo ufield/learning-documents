@@ -240,13 +240,15 @@ class MQTTUserManager:
 ### 6.3.2 OAuth 2.0 / JWT認証
 
 **JWT Token認証実装:**
-```javascript
-const jwt = require('jsonwebtoken');
-const mqtt = require('mqtt');
+```python
+import jwt
+import time
+import paho.mqtt.client as mqtt
+from typing import Dict, Optional
 
-class JWTMQTTClient {
-    constructor(brokerUrl, clientCredentials) {
-        this.brokerUrl = brokerUrl;
+class JWTMQTTClient:
+    def __init__(self, broker_url: str, client_credentials: Dict[str, str]):
+        self.broker_url = broker_url
         this.clientId = clientCredentials.clientId;
         this.clientSecret = clientCredentials.clientSecret;
         this.tokenEndpoint = clientCredentials.tokenEndpoint;

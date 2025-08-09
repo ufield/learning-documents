@@ -66,32 +66,36 @@ MQTTの核心となるのは、Publish-Subscribe（Pub/Sub）メッセージン�
 
 **クライアントライブラリ (2025年推奨):**
 
-#### JavaScript/Node.js
-```javascript
-// MQTT.js - 最も人気のあるJavaScriptライブラリ
-npm install mqtt
-
-const mqtt = require('mqtt');
-const client = mqtt.connect('mqtt://broker.example.com');
-```
-
-#### Python
+#### Python (推奨)
 ```python
 # paho-mqtt - 公式Pythonライブラリ
 pip install paho-mqtt
 
 import paho.mqtt.client as mqtt
 client = mqtt.Client()
+client.connect("broker.example.com", 1883, 60)
 ```
 
-#### Java
-```java
-// Eclipse Paho Java Client
-<dependency>
-    <groupId>org.eclipse.paho</groupId>
-    <artifactId>org.eclipse.paho.client.mqttv3</artifactId>
-    <version>1.2.5</version>
-</dependency>
+#### 非同期Python (高性能)
+```python
+# asyncio-mqtt - 非同期処理対応
+pip install asyncio-mqtt
+
+import asyncio
+from asyncio_mqtt import Client
+
+async def main():
+    async with Client("broker.example.com") as client:
+        await client.publish("test/topic", "Hello World!")
+```
+
+#### JavaScript/Node.js (参考)
+```javascript
+// MQTT.js
+npm install mqtt
+
+const mqtt = require('mqtt');
+const client = mqtt.connect('mqtt://broker.example.com');
 ```
 
 ## 2.3 Topic（トピック）
@@ -165,17 +169,17 @@ home/kitchen/#
 
 #### ワイルドカード使用時の注意点
 
-```javascript
-// 推奨: 具体的なsubscription
-client.subscribe('home/kitchen/temperature');
-client.subscribe('home/kitchen/humidity');
+```python
+# 推奨: 具体的なsubscription
+client.subscribe('home/kitchen/temperature')
+client.subscribe('home/kitchen/humidity')
 
-// 非推奨: 過度に広範囲なsubscription
-client.subscribe('#'); // 全てのメッセージを受信（性能問題）
+# 非推奨: 過度に広範囲なsubscription
+client.subscribe('#')  # 全てのメッセージを受信（性能問題）
 
-// 適切な使用例
-client.subscribe('home/+/temperature'); // 全部屋の温度のみ
-client.subscribe('factory/line1/#');    // 特定の生産ラインのみ
+# 適切な使用例
+client.subscribe('home/+/temperature')  # 全部屋の温度のみ
+client.subscribe('factory/line1/#')     # 特定の生産ラインのみ
 ```
 
 ## 2.4 Quality of Service (QoS)
@@ -248,30 +252,32 @@ Publisher → [PUBLISH] → Broker → [PUBLISH] → Subscriber
 
 ### 2.5.1 Clean Session（MQTT 3.1.1）
 
-```javascript
-// Clean Session = true（セッション情報を保持しない）
-const client = mqtt.connect('mqtt://broker.example.com', {
-    clean: true,
-    clientId: 'sensor001'
-});
+```python
+import paho.mqtt.client as mqtt
 
-// Clean Session = false（セッション情報を保持）
-const client = mqtt.connect('mqtt://broker.example.com', {
-    clean: false,
-    clientId: 'sensor001'
-});
+# Clean Session = True（セッション情報を保持しない）
+client = mqtt.Client(client_id="sensor001", clean_session=True)
+client.connect("broker.example.com", 1883, 60)
+
+# Clean Session = False（セッション情報を保持）
+client = mqtt.Client(client_id="sensor001", clean_session=False)
+client.connect("broker.example.com", 1883, 60)
 ```
 
 ### 2.5.2 Session Expiry（MQTT 5.0）
 
-```javascript
-// MQTT 5.0のより柔軟なセッション管理
-const client = mqtt.connect('mqtt://broker.example.com', {
-    protocolVersion: 5,
-    clean: false,              // Clean Start
-    sessionExpiryInterval: 300, // 5分後にセッション期限切れ
-    clientId: 'sensor001'
-});
+```python
+import paho.mqtt.client as mqtt
+import paho.mqtt.properties as properties
+
+# MQTT 5.0のより柔軟なセッション管理
+client = mqtt.Client(client_id="sensor001", protocol=mqtt.MQTTv5)
+
+# 接続プロパティの設定
+connect_props = properties.Properties(properties.PacketTypes.CONNECT)
+connect_props.SessionExpiryInterval = 300  # 5分後にセッション期限切れ
+
+client.connect("broker.example.com", 1883, 60, properties=connect_props)
 ```
 
 **セッションで保持される情報:**
@@ -282,10 +288,11 @@ const client = mqtt.connect('mqtt://broker.example.com', {
 
 ## 2.6 Keep Alive機能
 
-```javascript
-const client = mqtt.connect('mqtt://broker.example.com', {
-    keepalive: 60 // 60秒間隔でping送信
-});
+```python
+import paho.mqtt.client as mqtt
+
+client = mqtt.Client()
+client.connect("broker.example.com", 1883, keepalive=60)  # 60秒間隔でping送信
 ```
 
 **動作シーケンス:**
@@ -304,15 +311,20 @@ Client → [PINGREQ] → Broker
 
 クライアントが予期せず切断された場合の処理です。
 
-```javascript
-const client = mqtt.connect('mqtt://broker.example.com', {
-    will: {
-        topic: 'devices/sensor001/status',
-        payload: 'offline',
-        qos: 1,
-        retain: true
-    }
-});
+```python
+import paho.mqtt.client as mqtt
+
+client = mqtt.Client()
+
+# Last Will and Testament の設定
+client.will_set(
+    topic="devices/sensor001/status",
+    payload="offline",
+    qos=1,
+    retain=True
+)
+
+client.connect("broker.example.com", 1883, 60)
 ```
 
 **動作例:**
@@ -323,16 +335,27 @@ const client = mqtt.connect('mqtt://broker.example.com', {
 
 ## 2.8 Retained Messages
 
-```javascript
-// Retainedメッセージの送信
-client.publish('home/kitchen/temperature', '23.5', {
-    qos: 1,
-    retain: true
-});
+```python
+import paho.mqtt.client as mqtt
 
-// 新しいSubscriberがjoinした場合
-client.subscribe('home/kitchen/temperature');
-// すぐに最新の温度 "23.5" を受信
+client = mqtt.Client()
+client.connect("broker.example.com", 1883, 60)
+
+# Retainedメッセージの送信
+client.publish(
+    topic="home/kitchen/temperature", 
+    payload="23.5",
+    qos=1,
+    retain=True
+)
+
+# 新しいSubscriberがjoinした場合
+def on_message(client, userdata, msg):
+    print(f"Received: {msg.topic} - {msg.payload.decode()}")
+    # すぐに最新の温度 "23.5" を受信
+
+client.on_message = on_message
+client.subscribe("home/kitchen/temperature")
 ```
 
 **用途:**

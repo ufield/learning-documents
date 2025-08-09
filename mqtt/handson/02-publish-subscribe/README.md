@@ -36,112 +36,160 @@ Publisher → [Topic] → Broker → [Topic] → Subscriber(s)
 
 #### シンプルなPublisher作成
 
-`src/publisher.js` を作成：
+`src/publisher.py` を作成：
 
-```javascript
-const mqtt = require('mqtt');
-const chalk = require('chalk');
+```python
+import paho.mqtt.client as mqtt
+import json
+import time
+import threading
+from rich.console import Console
+from rich.text import Text
+from typing import Union, Dict, Any, Optional
+from datetime import datetime
 
-class MQTTPublisher {
-    constructor(brokerUrl = 'mqtt://localhost:1883') {
-        this.client = mqtt.connect(brokerUrl, {
-            clientId: `publisher-${Date.now()}`,
-            clean: true
-        });
+console = Console()
+
+class MQTTPublisher:
+    def __init__(self, broker_url: str = 'localhost', port: int = 1883):
+        self.broker_url = broker_url
+        self.port = port
+        self.client = mqtt.Client(
+            client_id=f"publisher-{int(time.time())}",
+            clean_session=True
+        )
         
-        this.setupEventHandlers();
-    }
+        self.connected = threading.Event()
+        self.setup_event_handlers()
     
-    setupEventHandlers() {
-        this.client.on('connect', () => {
-            console.log(chalk.green('📡 Publisher connected to broker'));
-        });
-        
-        this.client.on('error', (error) => {
-            console.error(chalk.red('❌ Publisher error:'), error.message);
-        });
-    }
+    def setup_event_handlers(self):
+        self.client.on_connect = self.on_connect
+        self.client.on_publish = self.on_publish
+        self.client.on_disconnect = self.on_disconnect
     
-    async publish(topic, message, options = {}) {
-        return new Promise((resolve, reject) => {
-            const payload = typeof message === 'object' ? JSON.stringify(message) : message;
+    def on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            console.print("📡 Publisher connected to broker", style="bold green")
+            self.connected.set()
+        else:
+            console.print(f"❌ Publisher connection failed: {rc}", style="bold red")
+    
+    def on_publish(self, client, userdata, mid):
+        console.print("✅ Message published successfully", style="green")
+    
+    def on_disconnect(self, client, userdata, rc):
+        console.print("👋 Publisher disconnected", style="yellow")
+        self.connected.clear()
+    
+    def connect(self) -> bool:
+        try:
+            self.client.connect(self.broker_url, self.port, 60)
+            self.client.loop_start()
             
-            console.log(chalk.blue(`📤 Publishing to topic: ${topic}`));
-            console.log(chalk.gray(`   Message: ${payload}`));
-            console.log(chalk.gray(`   QoS: ${options.qos || 0}`));
-            
-            this.client.publish(topic, payload, options, (error, packet) => {
-                if (error) {
-                    console.error(chalk.red('❌ Publish failed:'), error.message);
-                    reject(error);
-                } else {
-                    console.log(chalk.green('✅ Message published successfully'));
-                    resolve(packet);
-                }
-            });
-        });
-    }
+            # 接続完了を待機
+            if self.connected.wait(timeout=10):
+                return True
+            else:
+                console.print("❌ Connection timeout", style="bold red")
+                return False
+        except Exception as e:
+            console.print(f"❌ Connection error: {e}", style="bold red")
+            return False
     
-    disconnect() {
-        this.client.end();
-        console.log(chalk.yellow('👋 Publisher disconnected'));
-    }
-}
-
-// 使用例
-async function demonstratePublishing() {
-    const publisher = new MQTTPublisher();
+    def publish(self, topic: str, message: Union[str, Dict[str, Any]], 
+                qos: int = 0, retain: bool = False) -> bool:
+        """メッセージを送信"""
+        if not self.connected.is_set():
+            console.print("❌ Not connected to broker", style="bold red")
+            return False
+        
+        # メッセージを文字列に変換
+        if isinstance(message, dict):
+            payload = json.dumps(message, ensure_ascii=False)
+        else:
+            payload = str(message)
+        
+        console.print(f"📤 Publishing to topic: {topic}", style="bold blue")
+        console.print(f"   Message: {payload}", style="dim")
+        console.print(f"   QoS: {qos}", style="dim")
+        
+        try:
+            result = self.client.publish(topic, payload, qos, retain)
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                result.wait_for_publish()  # 送信完了を待機
+                return True
+            else:
+                console.print(f"❌ Publish failed: {result.rc}", style="bold red")
+                return False
+        except Exception as e:
+            console.print(f"❌ Publish error: {e}", style="bold red")
+            return False
     
-    // 接続完了まで少し待機
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    def disconnect(self):
+        if self.connected.is_set():
+            self.client.loop_stop()
+            self.client.disconnect()
+
+# 使用例
+def demonstrate_publishing():
+    publisher = MQTTPublisher()
     
-    try {
-        // シンプルなテキストメッセージ
-        await publisher.publish('sensors/temperature', '23.5');
+    if not publisher.connect():
+        console.print("❌ Failed to connect", style="bold red")
+        return
+    
+    try:
+        # シンプルなテキストメッセージ
+        publisher.publish('sensors/temperature', '23.5')
+        time.sleep(1)
         
-        // JSONメッセージ
-        await publisher.publish('sensors/data', {
-            sensorId: 'temp-001',
-            temperature: 23.5,
-            humidity: 45.2,
-            timestamp: new Date().toISOString()
-        });
+        # JSONメッセージ
+        sensor_data = {
+            'sensor_id': 'temp-001',
+            'temperature': 23.5,
+            'humidity': 45.2,
+            'timestamp': datetime.now().isoformat()
+        }
+        publisher.publish('sensors/data', sensor_data)
+        time.sleep(1)
         
-        // QoS 1でのメッセージ送信
-        await publisher.publish('alerts/high-temperature', 'Temperature exceeded threshold!', {
-            qos: 1
-        });
+        # QoS 1でのメッセージ送信
+        publisher.publish('alerts/high-temperature', 
+                         'Temperature exceeded threshold!', 
+                         qos=1)
+        time.sleep(1)
         
-        // Retainedメッセージ
-        await publisher.publish('sensors/temp-001/status', 'online', {
-            qos: 1,
-            retain: true
-        });
+        # Retainedメッセージ
+        publisher.publish('sensors/temp-001/status', 'online', 
+                         qos=1, retain=True)
+        time.sleep(1)
         
-    } catch (error) {
-        console.error('Publishing failed:', error);
-    } finally {
-        publisher.disconnect();
-    }
-}
+    except Exception as error:
+        console.print(f"Publishing failed: {error}", style="bold red")
+    finally:
+        publisher.disconnect()
 
-if (require.main === module) {
-    demonstratePublishing();
-}
-
-module.exports = MQTTPublisher;
+if __name__ == "__main__":
+    demonstrate_publishing()
 ```
 
 #### シンプルなSubscriber作成
 
-`src/subscriber.js` を作成：
+`src/subscriber.py` を作成：
 
-```javascript
-const mqtt = require('mqtt');
-const chalk = require('chalk');
+```python
+import paho.mqtt.client as mqtt
+import json
+import time
+import threading
+from rich.console import Console
+from rich.panel import Panel
+from typing import Callable, Optional, List
 
-class MQTTSubscriber {
-    constructor(brokerUrl = 'mqtt://localhost:1883') {
+console = Console()
+
+class MQTTSubscriber:
+    def __init__(self, broker_url: str = 'localhost', port: int = 1883):
         this.client = mqtt.connect(brokerUrl, {
             clientId: `subscriber-${Date.now()}`,
             clean: true

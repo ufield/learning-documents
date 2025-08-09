@@ -1,0 +1,3 @@
+# Handson 01: Setup and Basic Connection - Python Dependencies
+paho-mqtt>=1.6.1
+rich>=13.7.0
