@@ -5,7 +5,7 @@
 - モーダルルーティングの実装
 - アニメーション付きページ遷移
 - 無限スクロールとバーチャライゼーション
-- Vue Routerの高度なパターンとの比較
+- Nuxtの高度なパターンとの比較
 - 実世界のアプリケーション設計
 
 **想定読了時間**: 40分
@@ -14,30 +14,36 @@
 
 ## 🎯 モーダルルーティング
 
-### Vue Routerとの比較
+### Nuxtとの比較
 
-まず、Vue Routerでのモーダルルーティングとの比較から始めましょう：
+NuxtでのモーダルルーティングとReact Routerのアプローチを比較してみましょう：
 
-```javascript
-// Vue Router - Named Views
-const routes = [
-  {
-    path: '/users',
-    components: {
-      default: UsersList,
-      modal: null
-    }
-  },
-  {
-    path: '/users/:id',
-    components: {
-      default: UsersList,
-      modal: UserDetailModal
-    }
-  }
-]
+**Nuxtの場合（レイアウトベース）:**
+```vue
+<!-- layouts/modal.vue -->
+<template>
+  <div>
+    <!-- ベースレイアウト -->
+    <NuxtPage />
+    
+    <!-- 条件付きモーダル -->
+    <div v-if="$route.query.modal" class="modal-overlay">
+      <component :is="getModalComponent()" />
+    </div>
+  </div>
+</template>
 
-// React Router - Location State + Conditional Rendering
+<script setup>
+const getModalComponent = () => {
+  const modalType = useRoute().query.modal
+  return resolveComponent(`Modal${modalType}`)
+}
+</script>
+```
+
+**React Routerの場合（Stateベース）:**
+
+```tsx
 function App() {
   const location = useLocation()
   const background = location.state?.background
@@ -844,27 +850,28 @@ function ProductDetail() {
 }
 ```
 
-## 🔄 Vue Router → React Router 高度パターン比較
+## 🔄 Nuxt.js → React Router 高度パターン比较
 
-| パターン | Vue Router | React Router |
+| パターン | Nuxt.js | React Router |
 |----------|------------|--------------|
-| モーダルルート | Named Views | Location State + Conditional |
-| ページ遷移 | `<transition>` | Framer Motion + AnimatePresence |
-| 無限スクロール | 手動実装 | カスタムフック + Intersection Observer |
-| 状態管理統合 | Vuex/Pinia | Zustand/Redux + カスタムフック |
-| キャッシュ戦略 | keep-alive | React Query + カスタムフック |
-| 動的インポート | `() => import()` | `lazy()` + `Suspense` |
+| モーダルルート | クエリベース + レイアウト | Location State + Conditional |
+| ページ遷移 | `<Transition>` + CSS | Framer Motion + AnimatePresence |
+| 無限スクロール | `@nuxtjs/infinite-loading` | カスタムフック + Intersection Observer |
+| 状態管理統合 | Pinia + composables | Zustand/Redux + カスタムフック |
+| キャッシュ戦略 | Nitroキャッシュ | React Query + カスタムフック |
+| 動的インポート | 自動コード分割 | `lazy()` + `Suspense` |
+| SEOメタデータ | `useSeoMeta()` | Remix `meta()` + Helmet |
 
 ## 🎓 まとめ
 
-React Routerの高度なパターンは、Vue Routerを上回る柔軟性と現代的なReactエコシステムとの統合を提供します：
+React Routerの高度なパターンは、Nuxtとは異なるアプローチでありながら、Reactエコシステムとの深い統合と柔軟なカスタマイズ性を提供します：
 
 1. **モーダルルーティング**: Location Stateを活用した柔軟な実装
 2. **アニメーション**: Framer Motionとの深い統合
 3. **パフォーマンス**: 無限スクロールとバーチャライゼーション
 4. **状態管理**: 現代的な状態管理ライブラリとの統合
 
-これで React Router v7 の包括的な学習ドキュメントが完成しました。Vue/Nuxtの経験を活かしながら、React Routerの強力な機能を習得できる内容となっています。
+これで React Router v7 の包括的な学習ドキュメントが完成しました。Nuxtの経験を活かしながら、React Routerの強力な機能を習得できる内容となっています。
 
 ---
 

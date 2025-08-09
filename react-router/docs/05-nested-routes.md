@@ -14,25 +14,25 @@
 
 ## 🎯 ネストされたルートの基本概念
 
-### Vue Routerとの比較
+### Nuxtとの比較
 
-まず、Vue Routerのネストされたルートとの比較から始めましょう：
+Nuxtのネストされたルートと、React Routerでの実装方法を比較してみましょう：
 
+**Nuxtの場合（ディレクトリ構造）:**
+```
+pages/
+  admin/
+    index.vue        → /admin
+    users/
+      index.vue      → /admin/users  
+      [id].vue       → /admin/users/:id
+
+layouts/
+  admin.vue          # 共通レイアウト
+```
+
+**React Router (Data Mode):**
 ```javascript
-// Vue Router
-const routes = [
-  {
-    path: '/admin',
-    component: AdminLayout,
-    children: [
-      { path: '', component: Dashboard },        // /admin
-      { path: 'users', component: UserList },    // /admin/users
-      { path: 'users/:id', component: UserDetail } // /admin/users/:id
-    ]
-  }
-]
-
-// React Router (Data Mode)
 const router = createBrowserRouter([
   {
     path: "/admin",
@@ -44,8 +44,10 @@ const router = createBrowserRouter([
     ]
   }
 ])
+```
 
-// React Router (Declarative Mode)
+**React Router (Declarative Mode):**
+```jsx
 <Routes>
   <Route path="/admin" element={<AdminLayout />}>
     <Route index element={<Dashboard />} />
@@ -55,22 +57,35 @@ const router = createBrowserRouter([
 </Routes>
 ```
 
+**主な違い:**
+- **Nuxt**: フォルダ構造で階層を表現、レイアウトは別ファイル
+- **React Router**: 設定オブジェクトやJSXで階層を表現、レイアウトは親ルートの`element`
+- **共通点**: どちらもネストされた構造をサポート
+- **利点**: React Routerは条件付き階層やプログラム的な構造変更が容易
+
 ## 🔧 Outlet コンポーネント
 
-Vue Routerの`<router-view>`に相当するのが`<Outlet>`コンポーネントです：
+NuxtのNuxtPageに相当するのが、React RouterのOutletコンポーネントです：
 
-```tsx
-// Vue.js のレイアウトコンポーネント
+**Nuxtのレイアウトコンポーネント (layouts/admin.vue):**
+```vue
 <template>
   <div class="admin-layout">
-    <nav><!-- サイドバー --></nav>
-    <main>
-      <router-view /> <!-- 子ルートがここに表示される -->
+    <nav class="sidebar">
+      <!-- サイドバー -->
+      <NuxtLink to="/admin">ダッシュボード</NuxtLink>
+      <NuxtLink to="/admin/users">ユーザー管理</NuxtLink>
+      <NuxtLink to="/admin/products">商品管理</NuxtLink>
+    </nav>
+    <main class="content">
+      <NuxtPage /> <!-- 子ページがここに表示される -->
     </main>
   </div>
 </template>
+```
 
-// React のレイアウトコンポーネント
+**React Routerのレイアウトコンポーネント:**
+```tsx
 import { Outlet, Link } from 'react-router-dom'
 
 function AdminLayout() {
@@ -88,6 +103,12 @@ function AdminLayout() {
   )
 }
 ```
+
+**Outletの特徴:**
+- **Nuxtとの対応**: `<NuxtPage>` と同じ役割
+- **自動レンダリング**: マッチした子ルートが自動的に表示される
+- **データ受け渡し**: context propsで子コンポーネントにデータを渡せる
+- **レイアウト継承**: 複数階層でのレイアウト共有が可能
 
 ## 🏗️ 実用的なレイアウトパターン
 
@@ -392,15 +413,16 @@ function DashboardApp() {
 }
 ```
 
-## 🔄 Vue Router → React Router チートシート
+## 🔄 Nuxt.js → React Router チートシート
 
-| 概念 | Vue Router | React Router |
-|------|------------|--------------|
-| 子ルート表示 | `<router-view>` | `<Outlet>` |
-| ネストルート定義 | `children` 配列 | `children` 配列 |
-| インデックスルート | `path: ''` | `index: true` |
-| レイアウト継承 | 自動 | 明示的な `<Outlet>` |
-| データ共有 | props/provide/inject | Outlet context/React Context |
+| 概念 | Nuxt.js | React Router |
+|------|---------|--------------|
+| 子ページ表示 | `<NuxtPage>` | `<Outlet>` |
+| ネストルート定義 | ディレクトリ構造 | `children` 配列 |
+| インデックスルート | `index.vue` | `index: true` |
+| レイアウト | `layouts/` フォルダ | 親ルートの `element` |
+| データ共有 | provide/inject | Outlet context/React Context |
+| 共通レイアウト | `definePageMeta({ layout: 'admin' })` | レイアウトコンポーネント + `<Outlet>` |
 
 ## 💡 ベストプラクティス
 
@@ -500,12 +522,15 @@ function ResponsiveLayout() {
 
 ## 🎓 まとめ
 
-React Routerのネストされたルートは、Vue Routerと似た概念でありながら、より柔軟で型安全なレイアウト構築を可能にします：
+React Routerのネストされたルートは、Nuxtのディレクトリベースルーティングと異なるアプローチですが、より柔軟で型安全なレイアウト構築を可能にします：
 
-1. **Outletコンポーネント**: Vue Routerの`<router-view>`に相当
-2. **階層化されたレイアウト**: 複雑なアプリケーション構造に対応
-3. **データ共有**: Outlet ContextやReact Contextとの組み合わせ
-4. **型安全性**: TypeScriptとの優れた統合
+1. **Outletコンポーネント**: Nuxtの`<NuxtPage>`に相当する子ルート表示機能
+2. **明示的なレイアウト設計**: 設定ベースでより複雑な構造にも対応
+3. **階層的なデータ共有**: Outlet ContextやReact Contextを活用
+4. **条件付きレイアウト**: 認証状態などに基づく動的レイアウト変更
+5. **型安全性**: TypeScriptとの統合で開発時の安全性向上
+
+Nuxtのように「フォルダを作るだけ」の簡潔さはありませんが、その分レイアウトの組み合わせや条件分岐、プログラム的な制御において高い柔軟性を発揮します。特に大規模なアプリケーションで複数のレイアウトパターンが必要な場合に威力を発揮します。
 
 次章では、データローディングとActionsについて学びます。
 

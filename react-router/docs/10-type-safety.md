@@ -5,7 +5,7 @@
 - TypeScriptとReact Routerの深い統合
 - 型付きパラメータとクエリの実装
 - カスタムフックによる型安全性向上
-- Vue 3のTypeScript対応との比較
+- NuxtのTypeScript対応との比較
 - 実用的な型安全パターン
 
 **想定読了時間**: 35分
@@ -14,31 +14,37 @@
 
 ## 🎯 型安全ルーティングの基本概念
 
-### Vue 3 TypeScriptとの比較
+### Nuxt TypeScriptとの比較
 
-まず、Vue 3のTypeScriptサポートとReact Routerの比較から始めましょう：
+NuxtのTypeScriptサポートとReact Routerの型安全性を比較してみましょう：
 
+**Nuxtの場合（自動型推論）:**
 ```typescript
-// Vue 3 + TypeScript
-interface RouteParams {
+// pages/users/[id].vue
+<script setup lang="ts">
+interface User {
   id: string
+  name: string
+  email: string
 }
 
-// composition API
-export default defineComponent({
-  setup() {
-    const route = useRoute<RouteParams>()
-    const router = useRouter()
-    
-    const userId: string = route.params.id // 型安全
-    
-    const navigateToUser = (id: string) => {
-      router.push(`/users/${id}`)
-    }
-  }
-})
+// Nuxtが自動で型推論
+const route = useRoute() // 自動型付け
+const userId = route.params.id as string
 
-// React Router v7 + TypeScript
+// ナビゲーション
+const navigateToUser = (id: string) => {
+  return navigateTo(`/users/${id}`)
+}
+
+// データ取得（型安全）
+const { data: user } = await $fetch<User>(`/api/users/${userId}`)
+</script>
+```
+
+**React Routerの場合（明示的型付け）:**
+
+```tsx
 interface UserParams {
   id: string
 }
@@ -608,20 +614,21 @@ export function useSafeUserData() {
 }
 ```
 
-## 🔄 Vue 3 → React Router 型安全性比較
+## 🔄 Nuxt.js → React Router 型安全性比較
 
-| 機能 | Vue 3 | React Router |
+| 機能 | Nuxt.js | React Router |
 |------|-------|--------------|
-| ルートパラメータ | `useRoute<T>()` | `useParams<T>()` |
-| クエリパラメータ | `route.query` | `useSearchParams()` + Zod |
-| ナビゲーション | `router.push()` | `useNavigate()` |
-| 型付きパス生成 | 手動実装 | カスタムビルダー |
-| スキーマ検証 | 手動実装 | Zod統合 |
-| 実行時検証 | 手動実装 | Zodバリデーター |
+| ルートパラメータ | `useRoute().params` | `useParams<T>()` |
+| クエリパラメータ | `useRoute().query` | `useSearchParams()` + Zod |
+| ナビゲーション | `navigateTo()` | `useNavigate()` |
+| 型付きパス生成 | 自動置換・手動設定 | カスタムビルダー |
+| スキーマ検証 | `@vueuse/schema` | Zod統合 |
+| 実行時検証 | ランタイム検証 | Zodバリデーター |
+| API型安全性 | `$fetch<T>()` | カスタムフック + Zod |
 
 ## 🎓 まとめ
 
-React Routerの型安全性は、Vue 3のTypeScriptサポートを上回る柔軟性と厳密性を提供します：
+React Routerの型安全性は、Nuxtの自動型推論とは異なるアプローチで、明示的で厳密な型安全性を提供します：
 
 1. **型付きルート管理**: 定数とパスビルダーによる型安全なナビゲーション
 2. **スキーマ駆動開発**: Zodによる実行時検証との統合

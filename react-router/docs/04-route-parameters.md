@@ -2,13 +2,13 @@
 
 ## 📖 この章で学ぶこと
 
-- パスパラメータの定義と取得
+- パスパラメータの定義と取得方法
 - クエリパラメータ（URLSearchParams）の扱い
 - useParams と useSearchParams の使用方法
-- Vue Routerとの実装比較
-- 実用的なパラメータ処理パターン
+- Nuxtの動的ルートとの違い
+- 実用的なパラメータ処理パターンと応用例
 
-**想定読了時間**: 20分
+**想定読了時間**: 25分
 
 ---
 
@@ -16,29 +16,62 @@
 
 ### 基本的な動的ルート定義
 
-Vue Routerの動的セグメントと同様に、React Routerでもコロン（`:`）を使ってパラメータを定義します：
+Nuxtの動的ルートと同様に、React Routerでもコロン（`:`）を使ってパラメータを定義します：
 
+**Nuxtの場合（ファイルベース）:**
+```
+pages/
+  users/
+    [id].vue          → /users/:id
+  posts/
+    [id]/
+      comments/
+        [commentId].vue → /posts/:id/comments/:commentId
+```
+
+**React Routerの場合（設定ベース）:**
 ```tsx
-// Vue Router
-const routes = [
-  { path: '/users/:id', component: UserDetail },
-  { path: '/posts/:id/comments/:commentId', component: Comment }
-]
-
-// React Router
 <Routes>
   <Route path="/users/:id" element={<UserDetail />} />
   <Route path="/posts/:id/comments/:commentId" element={<Comment />} />
 </Routes>
+
+// または Data Mode での定義
+const router = createBrowserRouter([
+  { path: "/users/:id", element: <UserDetail /> },
+  { path: "/posts/:id/comments/:commentId", element: <Comment /> }
+])
 ```
+
+**主な違い:**
+- **Nuxt**: `[id]`のような角括弧でパラメータを表現
+- **React Router**: `:id`のようにコロンでパラメータを表現
+- **共通点**: どちらも動的セグメントをサポート
+- **利点**: React Routerは複雑なパラメータ構造も一箇所で管理
 
 ### useParams フックでパラメータを取得
 
+**Nuxtの場合:**
+```javascript
+// pages/users/[id].vue
+export default {
+  setup() {
+    const route = useRoute()
+    const userId = route.params.id // string
+    
+    return {
+      userId
+    }
+  }
+}
+```
+
+**React Routerの場合:**
 ```tsx
 import { useParams } from 'react-router-dom'
 
 function UserDetail() {
-  // Vue: this.$route.params.id
+  // Nuxt: route.params.id
   const { id } = useParams()
   
   // パラメータは常にstring型（またはundefined）
@@ -62,6 +95,12 @@ function CommentDetail() {
   )
 }
 ```
+
+**useParamsの特徴:**
+- **シンプル**: 分割代入で必要なパラメータだけ取得
+- **型推論**: TypeScriptで型注釈可能
+- **undefined対応**: 存在しないパラメータは`undefined`
+- **リアクティブ**: パラメータ変更時に自動で再レンダリング
 
 ### TypeScriptでの型安全なパラメータ
 
@@ -96,22 +135,44 @@ function ProductDetail() {
 
 ### useSearchParams フック
 
-Vue Routerの`$route.query`に相当する機能です：
+Nuxtでクエリパラメータを扱うのと同様に、React RouterではuseSearchParamsを使います：
 
+**Nuxtの場合:**
+```javascript
+export default {
+  setup() {
+    const route = useRoute()
+    
+    // クエリパラメータの取得
+    const category = route.query.category
+    const sortBy = route.query.sortBy
+    const page = route.query.page || '1'
+
+    // クエリパラメータの更新
+    const handleFilterChange = (newCategory) => {
+      navigateTo({
+        query: { ...route.query, category: newCategory }
+      })
+    }
+  }
+}
+```
+
+**React Routerの場合:**
 ```tsx
 import { useSearchParams } from 'react-router-dom'
 
 function ProductList() {
   const [searchParams, setSearchParams] = useSearchParams()
   
-  // Vue: this.$route.query.category
+  // Nuxt: route.query.category
   const category = searchParams.get('category')
   const sortBy = searchParams.get('sortBy')
   const page = searchParams.get('page') || '1'
 
   // クエリパラメータを更新
   const handleFilterChange = (newCategory: string) => {
-    // Vue: this.$router.push({ query: { ...this.$route.query, category: newCategory }})
+    // Nuxt: navigateTo({ query: { ...route.query, category: newCategory }})
     setSearchParams(prev => {
       prev.set('category', newCategory)
       return prev
@@ -137,6 +198,12 @@ function ProductList() {
   )
 }
 ```
+
+**useSearchParamsの特徴:**
+- **読み書き両対応**: 取得と更新を同じフックで処理
+- **URLSearchParams**: Web標準のAPIを使用
+- **履歴管理**: ブラウザ履歴に自動的に記録
+- **型安全**: TypeScriptとの親和性が高い
 
 ### URLSearchParams の実用的な使用例
 
@@ -344,15 +411,16 @@ function UserDetail() {
 }
 ```
 
-## 🔄 Vue Router → React Router チートシート
+## 🔄 Nuxt.js → React Router チートシート
 
-| 操作 | Vue Router | React Router |
-|------|------------|--------------|
-| パスパラメータ取得 | `this.$route.params.id` | `useParams().id` |
-| クエリパラメータ取得 | `this.$route.query.page` | `useSearchParams()[0].get('page')` |
-| クエリパラメータ更新 | `this.$router.push({ query: {...}})` | `setSearchParams({...})` |
-| 全パラメータ監視 | `watch: { $route() {} }` | `useEffect(() => {}, [params, searchParams])` |
-| パラメータ存在チェック | `!!this.$route.params.id` | `!!useParams().id` |
+| 操作 | Nuxt.js | React Router |
+|------|---------|--------------|
+| パスパラメータ取得 | `route.params.id` | `useParams().id` |
+| クエリパラメータ取得 | `route.query.page` | `useSearchParams()[0].get('page')` |
+| クエリパラメータ更新 | `navigateTo({ query: {...}})` | `setSearchParams({...})` |
+| 全パラメータ監視 | `watch(() => route.params)` | `useEffect(() => {}, [params, searchParams])` |
+| パラメータ存在チェック | `!!route.params.id` | `!!useParams().id` |
+| 動的ルート定義 | `[id].vue` | `:id` |
 
 ## 💡 ベストプラクティス
 
@@ -444,12 +512,15 @@ function ProductDetail() {
 
 ## 🎓 まとめ
 
-React Routerの動的ルーティングは、Vue Routerと同様の概念でありながら、Reactのフックベースアプローチの恩恵を受けています：
+React Routerの動的ルーティングは、Nuxtのファイルベースルーティングと同様の柔軟性を持ちながら、Reactのフックベースアプローチの恩恵を受けています：
 
-1. **useParams**: シンプルなパスパラメータの取得
-2. **useSearchParams**: 強力なクエリパラメータ管理
-3. **型安全性**: TypeScriptとの優れた統合
-4. **リアクティブ性**: パラメータ変更の自動監視
+1. **useParams**: シンプルで直感的なパスパラメータの取得
+2. **useSearchParams**: 強力で柔軟なクエリパラメータ管理
+3. **型安全性**: TypeScriptとの優れた統合で開発効率向上
+4. **リアクティブ性**: パラメータ変更時の自動再レンダリング
+5. **Web標準**: URLSearchParams APIの活用でモダンな実装
+
+Nuxtの`[id].vue`のような直感的なファイル命名はありませんが、`:id`による明示的な定義により、より複雑なパラメータ構造も管理しやすくなります。特にTypeScriptとの組み合わせで、パラメータの型安全性を確保できるのが大きな利点です。
 
 次章では、ネストされたルートとレイアウトパターンについて学びます。
 

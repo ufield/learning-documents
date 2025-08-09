@@ -16,18 +16,25 @@
 
 ### Nuxtとの比較
 
-React Routerの`loader`は、NuxtのSSRデータフェッチング機能と似た概念です：
+React Routerの`loader`は、Nuxtの`asyncData`や`fetch`と似た概念で、ページ表示前にデータを取得します：
 
+**Nuxtの場合:**
 ```javascript
-// Nuxt.js
+// pages/users/[id].vue
 export default {
-  async asyncData({ params, $axios }) {
-    const user = await $axios.$get(`/api/users/${params.id}`)
-    return { user }
+  async asyncData({ params, $fetch }) {
+    try {
+      const user = await $fetch(`/api/users/${params.id}`)
+      return { user }
+    } catch (error) {
+      throw createError({ statusCode: 404, statusMessage: 'User not found' })
+    }
   }
 }
+```
 
-// React Router v7
+**React Router v7の場合:**
+```javascript
 const router = createBrowserRouter([
   {
     path: "/users/:id",
@@ -42,6 +49,12 @@ const router = createBrowserRouter([
   }
 ])
 ```
+
+**主な違い:**
+- **Nuxt**: コンポーネント内でasyncDataを定義
+- **React Router**: 独立したloader関数をルート設定に関連付け
+- **共通点**: どちらもページ表示前にデータを事前取得
+- **エラー処理**: Nuxtは`createError`、React Routerは`Response`オブジェクトをthrow
 
 ### 基本的なLoader実装
 
@@ -426,16 +439,17 @@ export async function protectedLoader({ request }: LoaderFunctionArgs) {
 }
 ```
 
-## 🔄 Vue/Nuxt → React Router チートシート
+## 🔄 Nuxt.js → React Router チートシート
 
-| 機能 | Vue/Nuxt | React Router |
-|------|----------|--------------|
-| データ事前取得 | `asyncData` | `loader` |
-| フォーム送信 | `$axios.post()` | `action` + `Form` |
-| ローディング状態 | `$nuxt.$loading` | `useNavigation()` |
-| サーバーサイドデータ | `fetch()` | `loader` (SSR対応) |
+| 機能 | Nuxt.js | React Router |
+|------|---------|--------------|
+| データ事前取得 | `asyncData` / `fetch` | `loader` |
+| フォーム送信 | `$fetch` でPOST | `action` + `Form` |
+| ローディング状態 | `pending` / `$nuxt.$loading` | `useNavigation()` |
+| サーバーサイドデータ | SSR対応の`asyncData` | `loader` (SSR対応) |
 | 楽観的更新 | 手動実装 | `useFetcher` |
-| データ再取得 | `$fetch` | `useFetcher.load()` |
+| データ再取得 | `refresh()` | `useFetcher.load()` |
+| エラー処理 | `createError()` | `throw Response()` |
 
 ## 💡 ベストプラクティス
 
@@ -512,10 +526,13 @@ export async function cachedLoader({ params }: LoaderFunctionArgs) {
 
 React Routerのデータローディングシステムは、Nuxtのasync dataやfetchと似た概念でありながら、より柔軟で型安全なデータ管理を提供します：
 
-1. **loader関数**: ルート表示前のデータ事前取得
-2. **action関数**: フォーム送信とデータ更新
-3. **自動再取得**: アクション後の関連データ更新
-4. **楽観的更新**: レスポンシブなユーザー体験
+1. **loader関数**: Nuxtのasync dataに相当するデータ事前取得機能
+2. **action関数**: フォーム送信とデータ更新をルートレベルで処理
+3. **自動再取得**: アクション実行後の関連データ自動更新
+4. **楽観的更新**: useFetcherを使ったレスポンシブなユーザー体験
+5. **並列データ取得**: 複数のAPIを並行処理で効率的に取得
+
+Nuxtではコンポーネント内でasyncDataを定義するのに対し、React Routerでは独立したloader関数として定義し、ルート設定に関連付けます。この分離により、データ取得ロジックの再利用性が高まり、テストも容易になります。
 
 次章では、ナビゲーションガードと認証について学びます。
 

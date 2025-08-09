@@ -5,7 +5,7 @@
 - コード分割とReact.lazyによる遅延読み込み
 - プリフェッチング戦略
 - React 18/19の新機能活用
-- Vue/Nuxtの最適化技術との比較
+- Nuxtの最適化技術との比較
 - Bundle Analyzerを使った分析方法
 
 **想定読了時間**: 30分
@@ -14,23 +14,34 @@
 
 ## 🚀 コード分割と遅延読み込み
 
-### Vue/Nuxtとの比較
+### Nuxtとの比較
 
-まず、Vue/Nuxtの動的インポートとReact Routerの比較から始めましょう：
+Nuxtの動的インポートとReact Routerのコード分割を比較してみましょう：
 
+**Nuxtの場合（自動分割）:**
 ```javascript
-// Vue Router (Vue 3 + Vite)
-const routes = [
-  {
-    path: '/dashboard',
-    component: () => import('@/views/Dashboard.vue')
-  }
-]
-
-// Nuxt.js (自動コード分割)
 // pages/dashboard.vue が自動的にチャンクに分割される
+// Nuxtはページファイルを自動的に個別のチャンクに分割
 
-// React Router v7
+// 手動でのチャンク制御も可能
+// nuxt.config.ts
+export default defineNuxtConfig({
+  vite: {
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            vendor: ['vue', 'pinia']
+          }
+        }
+      }
+    }
+  }
+})
+```
+
+**React Routerの場合（明示的分割）:**
+```tsx
 import { lazy, Suspense } from 'react'
 
 const Dashboard = lazy(() => import('../pages/Dashboard'))
@@ -589,16 +600,17 @@ function PerformanceMonitor() {
 }
 ```
 
-## 🔄 Vue/Nuxt → React Router パフォーマンス比較
+## 🔄 Nuxt.js → React Router パフォーマンス比較
 
-| 機能 | Vue/Nuxt | React Router |
-|------|----------|--------------|
-| 動的インポート | `() => import()` | `lazy()` + `Suspense` |
-| プリフェッチング | `<nuxt-link prefetch>` | `prefetch="intent"` |
-| コード分割 | 自動（Nuxt） | 手動設定 |
+| 機能 | Nuxt.js | React Router |
+|------|---------|--------------|
+| SSR最適化 | 自動SSR/SSG | カスタム実装 |
+| 動的インポート | ページファイルが自動分割 | `lazy()` + `Suspense` |
+| プリフェッチング | `<NuxtLink prefetch>` | `prefetch="intent"` |
+| コード分割 | ファイルベース自動分割 | 設定ベース手動制御 |
 | バンドル分析 | `nuxi analyze` | Rollup Visualizer |
 | 画像最適化 | `@nuxt/image` | カスタム実装 |
-| フォント最適化 | `@nuxtjs/google-fonts` | カスタム実装 |
+| フォント最適化 | `@nuxtjs/google-fonts` | Web標準API |
 
 ## 💡 ベストプラクティス
 
@@ -645,7 +657,7 @@ function NavigationMenu() {
 
 ## 🎓 まとめ
 
-React Routerでのパフォーマンス最適化は、Vue/Nuxtと同様の概念でありながら、より細かい制御と現代的なReactの機能を活用できます：
+React Routerでのパフォーマンス最適化は、Nuxtと同様の概念でありながら、より細かい制御と現代的なReactの機能を活用できます：
 
 1. **コード分割**: 戦略的なチャンク分割による初期読み込み高速化
 2. **プリフェッチング**: インテリジェントな事前読み込み

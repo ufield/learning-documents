@@ -14,24 +14,30 @@
 
 ## 🎯 認証の基本概念
 
-### Vue Routerとの比較
+### Nuxtとの比較
 
-Vue Routerのナビゲーションガードと、React Routerでの同等の実装を比較してみましょう：
+Nuxtのmiddlewareと、React Routerでの認証ガード実装を比較してみましょう：
 
+**Nuxtの場合:**
 ```javascript
-// Vue Router - グローバルガード
-router.beforeEach((to, from, next) => {
-  const isAuthenticated = store.getters.isAuthenticated
-  const requiresAuth = to.matched.some(record => record.meta.requiresAuth)
+// middleware/auth.js
+export default function ({ store, redirect, route }) {
+  const isAuthenticated = store.getters['auth/isAuthenticated']
   
-  if (requiresAuth && !isAuthenticated) {
-    next('/login')
-  } else {
-    next()
+  if (!isAuthenticated) {
+    return redirect(`/login?redirect=${route.fullPath}`)
   }
-})
+}
 
-// React Router - loader関数によるガード
+// pages/dashboard.vue
+export default {
+  middleware: 'auth' // ミドルウェアを適用
+}
+```
+
+**React Routerの場合:**
+```javascript
+// loader関数によるガード
 async function protectedLoader({ request }: LoaderFunctionArgs) {
   const isAuthenticated = await checkAuth()
   
@@ -42,7 +48,20 @@ async function protectedLoader({ request }: LoaderFunctionArgs) {
   
   return null
 }
+
+// ルート設定
+{
+  path: "/dashboard",
+  element: <Dashboard />,
+  loader: protectedLoader
+}
 ```
+
+**主な違い:**
+- **Nuxt**: middlewareフォルダでミドルウェアを定義し、ページで指定
+- **React Router**: loader関数でガードロジックを実装し、ルートに関連付け
+- **共通点**: どちらもページ表示前に認証チェックを実行
+- **利点**: React Routerはloader内でデータ取得と認証を同時に処理可能
 
 ## 🔐 基本的な認証実装
 
