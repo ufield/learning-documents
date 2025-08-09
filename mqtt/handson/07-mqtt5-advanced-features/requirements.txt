@@ -1,0 +1,36 @@
+# Core MQTT 5.0
+paho-mqtt>=1.6.1  # MQTT 5.0 support requires 1.6.1+
+
+# Rich console output
+rich>=13.0.0
+
+# Type hints
+typing-extensions>=4.0.0
+
+# Date/time handling
+python-dateutil>=2.8.0
+
+# JSON handling
+orjson>=3.8.0  # Fast JSON library
+
+# UUID generation
+uuid  # Built-in with Python
+
+# Threading
+threading  # Built-in with Python
+
+# Time utilities
+time  # Built-in with Python
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# Configuration
+PyYAML>=6.0
+
+# Async support (optional)
+asyncio-mqtt>=0.16.1
+
+# Enhanced authentication support (optional)
+cryptography>=3.0.0  # For SASL/SCRAM if implemented
