@@ -17,18 +17,20 @@ MQTT 5.0は2019年にOASIS標準として承認された最新バージョンで
 
 ### 7.1.2 後方互換性
 
-```javascript
-// MQTT 3.1.1クライアント
-const client311 = mqtt.connect('mqtt://broker.example.com', {
-    protocolVersion: 4  // MQTT 3.1.1
-});
+```python
+import paho.mqtt.client as mqtt
 
-// MQTT 5.0クライアント
-const client50 = mqtt.connect('mqtt://broker.example.com', {
-    protocolVersion: 5  // MQTT 5.0
-});
+# MQTT 3.1.1クライアント
+client311 = mqtt.Client(protocol=mqtt.MQTTv311)  # MQTT 3.1.1
+client311.connect('broker.example.com', 1883, 60)
 
-// 同じブローカーで両方のクライアントが共存可能
+# MQTT 5.0クライアント
+client50 = mqtt.Client(protocol=mqtt.MQTTv5)  # MQTT 5.0
+client50.connect('broker.example.com', 1883, 60)
+
+# 同じブローカーで両方のクライアントが共存可能
+print("MQTT 3.1.1 protocol number:", mqtt.MQTTv311)  # 4
+print("MQTT 5.0 protocol number:", mqtt.MQTTv5)      # 5
 ```
 
 ## 7.2 Enhanced Session Management
@@ -37,21 +39,7 @@ const client50 = mqtt.connect('mqtt://broker.example.com', {
 
 MQTT 5.0では、セッション開始時の挙動と終了時の挙動を独立して制御できます。
 
-```javascript
-const client = mqtt.connect('mqtt://broker.example.com', {
-    protocolVersion: 5,
-    clean: false,  // Clean Start = false（既存セッション再開）
-    sessionExpiryInterval: 3600,  // 1時間後にセッション期限切れ
-    clientId: 'persistent-client'
-});
-
-client.on('connect', (connack) => {
-    console.log('Session Present:', connack.sessionPresent);
-    console.log('Reason Code:', connack.reasonCode);
-});
-```
-
-**実用的な使用例:**
+**基本的な使用例:**
 
 ```python
 import paho.mqtt.client as mqtt
@@ -80,29 +68,45 @@ client.loop_forever()
 
 ### 7.2.2 Will Message の拡張
 
-```javascript
-const client = mqtt.connect('mqtt://broker.example.com', {
-    protocolVersion: 5,
-    will: {
-        topic: 'devices/sensor001/status',
-        payload: JSON.stringify({
-            status: 'offline',
-            reason: 'unexpected_disconnect',
-            timestamp: Date.now()
-        }),
-        qos: 1,
-        retain: true,
-        properties: {
-            willDelayInterval: 30,  // 30秒後にWillメッセージ送信
-            payloadFormatIndicator: 1,  // UTF-8文字列
-            contentType: 'application/json',
-            userProperties: {
-                'device_type': 'temperature_sensor',
-                'location': 'warehouse_a'
-            }
-        }
-    }
-});
+```python
+import paho.mqtt.client as mqtt
+import paho.mqtt.properties as properties
+import json
+import time
+
+def create_mqtt5_client_with_will():
+    client = mqtt.Client(client_id="sensor001", protocol=mqtt.MQTTv5)
+    
+    # Will Message のプロパティ設定
+    will_props = properties.Properties(properties.PacketTypes.WILLMESSAGE)
+    will_props.WillDelayInterval = 30  # 30秒後にWillメッセージ送信
+    will_props.PayloadFormatIndicator = 1  # UTF-8文字列
+    will_props.ContentType = "application/json"
+    will_props.UserProperty = [
+        ("device_type", "temperature_sensor"),
+        ("location", "warehouse_a")
+    ]
+    
+    # Will Message の設定
+    will_payload = json.dumps({
+        "status": "offline",
+        "reason": "unexpected_disconnect",
+        "timestamp": int(time.time() * 1000)
+    })
+    
+    client.will_set(
+        topic="devices/sensor001/status",
+        payload=will_payload,
+        qos=1,
+        retain=True,
+        properties=will_props
+    )
+    
+    return client
+
+# 使用例
+client = create_mqtt5_client_with_will()
+client.connect("broker.example.com", 1883, 60)
 ```
 
 ## 7.3 Reason Codes と Error Handling
@@ -111,34 +115,60 @@ const client = mqtt.connect('mqtt://broker.example.com', {
 
 MQTT 5.0では、操作結果に対して詳細な理由コードが提供されます：
 
-```javascript
-client.publish('sensors/data', JSON.stringify(sensorData), {
-    qos: 1,
-    properties: {
-        messageExpiryInterval: 300  // 5分で期限切れ
+```python
+import paho.mqtt.client as mqtt
+import paho.mqtt.properties as properties
+import json
+
+def on_publish(client, userdata, mid, reason_code, prop):
+    """MQTT 5.0のpublishコールバック"""
+    reason_messages = {
+        0: "Publish successful",
+        16: "No matching subscribers",
+        128: "Unspecified error",
+        131: "Implementation specific error",
+        135: "Not authorized",
+        144: "Topic Name invalid",
+        149: "Packet too large",
+        151: "Quota exceeded",
+        153: "Payload format invalid"
     }
-}, (err, packet) => {
-    if (err) {
-        console.error('Publish failed:', err);
-    } else if (packet && packet.reasonCode) {
-        switch (packet.reasonCode) {
-            case 0:
-                console.log('Publish successful');
-                break;
-            case 16:
-                console.log('No matching subscribers');
-                break;
-            case 135:
-                console.log('Not authorized');
-                break;
-            case 151:
-                console.log('Quota exceeded');
-                break;
-            default:
-                console.log('Publish result:', packet.reasonCode);
-        }
-    }
-});
+    
+    message = reason_messages.get(reason_code, f"Unknown reason code: {reason_code}")
+    print(f"Publish result (MID: {mid}): {message}")
+    
+    # プロパティから追加情報を取得
+    if prop and hasattr(prop, 'ReasonString'):
+        print(f"  Reason string: {prop.ReasonString}")
+    if prop and hasattr(prop, 'UserProperty'):
+        print(f"  User properties: {prop.UserProperty}")
+
+# クライアント設定
+client = mqtt.Client(protocol=mqtt.MQTTv5)
+client.on_publish = on_publish
+
+# メッセージプロパティの設定
+pub_props = properties.Properties(properties.PacketTypes.PUBLISH)
+pub_props.MessageExpiryInterval = 300  # 5分で期限切れ
+pub_props.ContentType = "application/json"
+pub_props.ResponseTopic = "sensors/response"  # 応答トピック
+
+# データ送信
+sensor_data = {"temperature": 23.5, "humidity": 45.2}
+client.connect("broker.example.com", 1883, 60)
+client.loop_start()
+
+result = client.publish(
+    "sensors/data",
+    json.dumps(sensor_data),
+    qos=1,
+    properties=pub_props
+)
+
+if result.rc == mqtt.MQTT_ERR_SUCCESS:
+    print(f"Message queued with MID: {result.mid}")
+else:
+    print(f"Publish failed with error: {result.rc}")
 ```
 
 **主要な理由コード:**
@@ -196,39 +226,46 @@ client.on_disconnect = on_disconnect
 
 ### 7.4.1 メタデータの追加
 
-```javascript
-// センサーデータにメタデータを追加
-client.publish('sensors/temperature', '23.5', {
-    qos: 1,
-    properties: {
-        payloadFormatIndicator: 1,  // UTF-8文字列
-        contentType: 'text/plain',
-        userProperties: {
-            'sensor_id': 'TEMP001',
-            'location': 'Building-A-Floor-2',
-            'unit': 'celsius',
-            'accuracy': '±0.1°C',
-            'calibration_date': '2025-01-15',
-            'firmware_version': '1.2.3'
-        }
-    }
-});
+```python
+import paho.mqtt.client as mqtt
+import paho.mqtt.properties as properties
+import json
 
-// 受信側でメタデータ活用
-client.on('message', (topic, message, packet) => {
-    const userProps = packet.properties?.userProperties || {};
+# センサーデータにメタデータを追加
+client = mqtt.Client(protocol=mqtt.MQTTv5)
+
+# パブリッシュプロパティ設定
+pub_props = properties.Properties(properties.PacketTypes.PUBLISH)
+pub_props.PayloadFormatIndicator = 1  # UTF-8文字列
+pub_props.ContentType = 'text/plain'
+pub_props.UserProperty = [
+    ('sensor_id', 'TEMP001'),
+    ('location', 'Building-A-Floor-2'),
+    ('unit', 'celsius'),
+    ('accuracy', '±0.1°C'),
+    ('calibration_date', '2025-01-15'),
+    ('firmware_version', '1.2.3')
+]
+
+client.publish('sensors/temperature', '23.5', qos=1, properties=pub_props)
+
+# 受信側でメタデータ活用
+def on_message(client, userdata, message):
+    user_props = {}
+    if message.properties and hasattr(message.properties, 'UserProperty'):
+        user_props = dict(message.properties.UserProperty)
     
-    console.log(`Data: ${message.toString()}`);
-    console.log(`Sensor: ${userProps.sensor_id}`);
-    console.log(`Location: ${userProps.location}`);
-    console.log(`Unit: ${userProps.unit}`);
+    print(f"Data: {message.payload.decode()}")
+    print(f"Sensor: {user_props.get('sensor_id', 'Unknown')}")
+    print(f"Location: {user_props.get('location', 'Unknown')}")
+    print(f"Unit: {user_props.get('unit', 'Unknown')}")
     
-    // メタデータに基づく処理分岐
-    if (userProps.firmware_version && 
-        semver.lt(userProps.firmware_version, '1.2.0')) {
-        console.warn('Old firmware detected, please update');
-    }
-});
+    # メタデータに基づく処理分岐
+    firmware_version = user_props.get('firmware_version')
+    if firmware_version and firmware_version < '1.2.0':
+        print("Old firmware detected, please update")
+
+client.on_message = on_message
 ```
 
 ### 7.4.2 ルーティングとフィルタリング
@@ -294,63 +331,86 @@ client.on_message = router.on_message
 
 ### 7.5.1 帯域幅最適化
 
-```javascript
-class TopicAliasManager {
-    constructor(maxTopicAlias = 10) {
-        this.maxTopicAlias = maxTopicAlias;
-        this.aliases = new Map(); // topic -> alias
-        this.reverseAliases = new Map(); // alias -> topic
-        this.nextAlias = 1;
-    }
+```python
+import paho.mqtt.client as mqtt
+import paho.mqtt.properties as properties
+import json
+import threading
+import time
+from typing import Dict, Optional, Any
+
+class TopicAliasManager:
+    def __init__(self, max_topic_alias: int = 10):
+        self.max_topic_alias = max_topic_alias
+        self.aliases: Dict[str, int] = {}  # topic -> alias
+        self.reverse_aliases: Dict[int, str] = {}  # alias -> topic
+        self.next_alias = 1
+        self.lock = threading.Lock()
     
-    publish(client, topic, message, options = {}) {
-        let topicAlias = this.aliases.get(topic);
-        
-        if (!topicAlias && this.nextAlias <= this.maxTopicAlias) {
-            // 新しいエイリアスを割り当て
-            topicAlias = this.nextAlias++;
-            this.aliases.set(topic, topicAlias);
-            this.reverseAliases.set(topicAlias, topic);
+    def publish(self, client: mqtt.Client, topic: str, message: str, **options) -> bool:
+        """Topic Aliasを使用してメッセージをパブリッシュ"""
+        with self.lock:
+            topic_alias = self.aliases.get(topic)
             
-            // 最初の送信：トピック名とエイリアス両方を含む
-            return client.publish(topic, message, {
-                ...options,
-                properties: {
-                    ...options.properties,
-                    topicAlias: topicAlias
-                }
-            });
-        } else if (topicAlias) {
-            // エイリアスのみで送信（帯域幅節約）
-            return client.publish('', message, {
-                ...options,
-                properties: {
-                    ...options.properties,
-                    topicAlias: topicAlias
-                }
-            });
-        } else {
-            // エイリアス上限に達した場合は通常送信
-            return client.publish(topic, message, options);
-        }
-    }
+            if not topic_alias and self.next_alias <= self.max_topic_alias:
+                # 新しいエイリアスを割り当て
+                topic_alias = self.next_alias
+                self.next_alias += 1
+                self.aliases[topic] = topic_alias
+                self.reverse_aliases[topic_alias] = topic
+                
+                # 最初の送信：トピック名とエイリアス両方を含む
+                pub_props = options.get('properties') or properties.Properties(properties.PacketTypes.PUBLISH)
+                pub_props.TopicAlias = topic_alias
+                
+                result = client.publish(topic, message, qos=options.get('qos', 0), properties=pub_props)
+                return result.rc == mqtt.MQTT_ERR_SUCCESS
+                
+            elif topic_alias:
+                # エイリアスのみで送信（帯域幅節約）
+                pub_props = options.get('properties') or properties.Properties(properties.PacketTypes.PUBLISH)
+                pub_props.TopicAlias = topic_alias
+                
+                result = client.publish('', message, qos=options.get('qos', 0), properties=pub_props)
+                return result.rc == mqtt.MQTT_ERR_SUCCESS
+            else:
+                # エイリアス上限に達した場合は通常送信
+                result = client.publish(topic, message, **options)
+                return result.rc == mqtt.MQTT_ERR_SUCCESS
     
-    getTopicFromAlias(alias) {
-        return this.reverseAliases.get(alias);
+    def get_topic_from_alias(self, alias: int) -> Optional[str]:
+        """エイリアスから元のトピック名を取得"""
+        return self.reverse_aliases.get(alias)
+
+# 使用例
+def generate_sensor_data() -> dict:
+    """センサーデータの生成"""
+    import random
+    return {
+        "temperature": round(random.uniform(20.0, 30.0), 1),
+        "humidity": round(random.uniform(40.0, 60.0), 1),
+        "timestamp": int(time.time())
     }
-}
 
-// 使用例
-const aliasManager = new TopicAliasManager(10);
+alias_manager = TopicAliasManager(10)
+client = mqtt.Client(protocol=mqtt.MQTTv5)
+client.connect("broker.example.com", 1883, 60)
 
-// 頻繁に使用されるトピックを最適化
-setInterval(() => {
-    const longTopic = 'industrial/manufacturing/line1/station5/sensor/temperature/celsius';
-    const data = generateSensorData();
-    
-    // 最初の送信後は帯域幅を大幅に節約
-    aliasManager.publish(client, longTopic, JSON.stringify(data), { qos: 1 });
-}, 1000);
+# 頻繁に使用されるトピックを最適化
+def publish_sensor_data():
+    while True:
+        long_topic = 'industrial/manufacturing/line1/station5/sensor/temperature/celsius'
+        data = generate_sensor_data()
+        
+        # 最初の送信後は帯域幅を大幅に節約
+        success = alias_manager.publish(client, long_topic, json.dumps(data), qos=1)
+        if success:
+            print(f"Data published to {long_topic}")
+        
+        time.sleep(1)
+
+# バックグラウンドで実行
+threading.Thread(target=publish_sensor_data, daemon=True).start()
 ```
 
 ### 7.5.2 大規模IoTでの効果
@@ -408,38 +468,79 @@ print(f"Bandwidth savings: {results['savings_percentage']:.1f}%")
 
 ### 7.6.1 負荷分散の実装
 
-```javascript
-// ワーカープロセス1
-const worker1 = mqtt.connect('mqtt://broker.example.com', {
-    protocolVersion: 5,
-    clientId: 'worker-1'
-});
+```python
+import paho.mqtt.client as mqtt
+import threading
+import time
 
-worker1.subscribe('$share/data-processors/sensors/+/data', { qos: 1 });
+# ワーカークラス定義
+class DataProcessor:
+    def __init__(self, worker_id: str, broker_host: str = 'broker.example.com'):
+        self.worker_id = worker_id
+        self.client = mqtt.Client(client_id=worker_id, protocol=mqtt.MQTTv5)
+        self.client.on_connect = self.on_connect
+        self.client.on_message = self.on_message
+        
+        # ブローカーに接続
+        self.client.connect(broker_host, 1883, 60)
+        
+    def on_connect(self, client, userdata, flags, rc, props):
+        if rc == 0:
+            print(f"Worker {self.worker_id} connected")
+            # 共有購読でデータ処理タスクを購読
+            client.subscribe('$share/data-processors/sensors/+/data', qos=1)
+        else:
+            print(f"Worker {self.worker_id} connection failed: {rc}")
+            
+    def on_message(self, client, userdata, message):
+        print(f"Worker {self.worker_id} processing: {message.topic}")
+        
+        # メッセージ処理ロジック
+        try:
+            data = message.payload.decode()
+            # 実際の処理（例：データ変換、検証、保存など）
+            processed_data = self.process_data(data)
+            print(f"  Processed by {self.worker_id}: {processed_data[:50]}...")
+        except Exception as e:
+            print(f"  Error in {self.worker_id}: {e}")
+    
+    def process_data(self, data: str) -> str:
+        """データ処理の実装（例）"""
+        # シミュレート処理時間
+        time.sleep(0.1)
+        return f"PROCESSED_{data}"
+    
+    def start(self):
+        """ワーカー開始"""
+        self.client.loop_forever()
+    
+    def stop(self):
+        """ワーカー停止"""
+        self.client.disconnect()
 
-// ワーカープロセス2  
-const worker2 = mqtt.connect('mqtt://broker.example.com', {
-    protocolVersion: 5,
-    clientId: 'worker-2'
-});
+# ワーカープロセスを作成
+workers = []
+for i in range(1, 4):  # 3つのワーカー
+    worker = DataProcessor(f'worker-{i}')
+    workers.append(worker)
+    
+    # 各ワーカーを別スレッドで開始
+    thread = threading.Thread(target=worker.start, daemon=True)
+    thread.start()
+    print(f"Started worker-{i}")
 
-worker2.subscribe('$share/data-processors/sensors/+/data', { qos: 1 });
+# メッセージは3つのワーカー間で負荷分散される
+print("Workers are running and sharing the load...")
+print("Press Ctrl+C to stop")
 
-// ワーカープロセス3
-const worker3 = mqtt.connect('mqtt://broker.example.com', {
-    protocolVersion: 5,
-    clientId: 'worker-3'
-});
-
-worker3.subscribe('$share/data-processors/sensors/+/data', { qos: 1 });
-
-// メッセージは3つのワーカー間で負荷分散される
-[worker1, worker2, worker3].forEach((worker, index) => {
-    worker.on('message', (topic, message) => {
-        console.log(`Worker ${index + 1} processing: ${topic}`);
-        // メッセージ処理ロジック
-    });
-});
+try:
+    # メインスレッド継続
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("\nStopping workers...")
+    for worker in workers:
+        worker.stop()
 ```
 
 ### 7.6.2 高可用性クラスター
@@ -590,22 +691,41 @@ if __name__ == "__main__":
 
 ### 7.7.1 Receive Maximum
 
-```javascript
-const client = mqtt.connect('mqtt://broker.example.com', {
-    protocolVersion: 5,
-    properties: {
-        receiveMaximum: 50,  // 同時に50個まで未確認メッセージを処理
-        maximumPacketSize: 65536  // 最大64KBパケット
-    }
-});
+```python
+import paho.mqtt.client as mqtt
+import paho.mqtt.properties as properties
 
-client.on('connect', (connack) => {
-    console.log('Server capabilities:');
-    console.log('- Receive Maximum:', connack.properties?.receiveMaximum);
-    console.log('- Maximum QoS:', connack.properties?.maximumQoS);
-    console.log('- Retain Available:', connack.properties?.retainAvailable);
-    console.log('- Wildcard Subscription:', connack.properties?.wildcardSubscriptionAvailable);
-});
+# 接続プロパティの設定
+connect_props = properties.Properties(properties.PacketTypes.CONNECT)
+connect_props.ReceiveMaximum = 50  # 同時に50個まで未確認メッセージを処理
+connect_props.MaximumPacketSize = 65536  # 最大64KBパケット
+
+def on_connect(client, userdata, flags, rc, props):
+    if rc == 0:
+        print('Connected successfully')
+        print('Server capabilities:')
+        
+        # サーバーのプロパティを確認
+        if props:
+            if hasattr(props, 'ReceiveMaximum'):
+                print(f'- Receive Maximum: {props.ReceiveMaximum}')
+            if hasattr(props, 'MaximumQoS'):
+                print(f'- Maximum QoS: {props.MaximumQoS}')
+            if hasattr(props, 'RetainAvailable'):
+                print(f'- Retain Available: {props.RetainAvailable}')
+            if hasattr(props, 'WildcardSubscriptionAvailable'):
+                print(f'- Wildcard Subscription: {props.WildcardSubscriptionAvailable}')
+            if hasattr(props, 'SharedSubscriptionAvailable'):
+                print(f'- Shared Subscription: {props.SharedSubscriptionAvailable}')
+    else:
+        print(f'Connection failed: {rc}')
+
+client = mqtt.Client(protocol=mqtt.MQTTv5)
+client.on_connect = on_connect
+
+# プロパティ付きで接続
+client.connect('broker.example.com', 1883, 60, properties=connect_props)
+client.loop_forever()
 ```
 
 ### 7.7.2 バックプレッシャー制御
@@ -693,116 +813,182 @@ class BackpressureController:
 
 ### 7.8.1 Response Topic の活用
 
-```javascript
-class MQTTRequestResponse {
-    constructor(client) {
-        this.client = client;
-        this.responseTopicPrefix = `responses/${client.options.clientId}`;
-        this.pendingRequests = new Map();
-        this.setupResponseHandler();
-    }
-    
-    setupResponseHandler() {
-        // レスポンス用トピックを購読
-        this.client.subscribe(`${this.responseTopicPrefix}/+`, { qos: 1 });
-        
-        this.client.on('message', (topic, message, packet) => {
-            if (topic.startsWith(this.responseTopicPrefix)) {
-                this.handleResponse(topic, message, packet);
-            }
-        });
-    }
-    
-    async sendRequest(requestTopic, requestData, timeout = 30000) {
-        const correlationId = this.generateCorrelationId();
-        const responseTopic = `${this.responseTopicPrefix}/${correlationId}`;
-        
-        return new Promise((resolve, reject) => {
-            // タイムアウト設定
-            const timeoutId = setTimeout(() => {
-                this.pendingRequests.delete(correlationId);
-                reject(new Error(`Request timeout after ${timeout}ms`));
-            }, timeout);
-            
-            this.pendingRequests.set(correlationId, {
-                resolve,
-                reject,
-                timeoutId,
-                timestamp: Date.now()
-            });
-            
-            // リクエスト送信
-            this.client.publish(requestTopic, JSON.stringify(requestData), {
-                qos: 1,
-                properties: {
-                    responseTopic: responseTopic,
-                    correlationData: Buffer.from(correlationId),
-                    userProperties: {
-                        'request_type': 'api_call',
-                        'client_version': '1.0.0'
-                    }
-                }
-            }, (err) => {
-                if (err) {
-                    clearTimeout(timeoutId);
-                    this.pendingRequests.delete(correlationId);
-                    reject(err);
-                }
-            });
-        });
-    }
-    
-    handleResponse(topic, message, packet) {
-        const correlationData = packet.properties?.correlationData;
-        if (!correlationData) return;
-        
-        const correlationId = correlationData.toString();
-        const pendingRequest = this.pendingRequests.get(correlationId);
-        
-        if (pendingRequest) {
-            clearTimeout(pendingRequest.timeoutId);
-            this.pendingRequests.delete(correlationId);
-            
-            try {
-                const responseData = JSON.parse(message.toString());
-                pendingRequest.resolve(responseData);
-            } catch (err) {
-                pendingRequest.reject(new Error('Invalid response format'));
-            }
-        }
-    }
-    
-    generateCorrelationId() {
-        return `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    }
-}
+```python
+import paho.mqtt.client as mqtt
+import paho.mqtt.properties as properties
+import json
+import threading
+import time
+import uuid
+from typing import Dict, Any, Callable, Optional
+import asyncio
+from concurrent.futures import Future
 
-// 使用例
-const requestResponse = new MQTTRequestResponse(client);
-
-// デバイス設定取得
-try {
-    const config = await requestResponse.sendRequest('devices/sensor001/get_config', {
-        sections: ['network', 'sampling']
-    }, 10000);
+class MQTTRequestResponse:
+    def __init__(self, client: mqtt.Client):
+        self.client = client
+        self.client_id = client._client_id.decode() if hasattr(client, '_client_id') else 'unknown'
+        self.response_topic_prefix = f"responses/{self.client_id}"
+        self.pending_requests: Dict[str, Future] = {}
+        self.setup_response_handler()
+        
+    def setup_response_handler(self):
+        """レスポンスハンドラーの設定"""
+        # レスポンス用トピックを購読
+        self.client.subscribe(f"{self.response_topic_prefix}/+", qos=1)
+        
+        # 既存のon_messageがあれば保存
+        original_on_message = self.client.on_message
+        
+        def combined_on_message(client, userdata, message):
+            # レスポンストピックの処理
+            if message.topic.startswith(self.response_topic_prefix):
+                self.handle_response(message.topic, message)
+            # 元のハンドラーがあれば実行
+            elif original_on_message:
+                original_on_message(client, userdata, message)
+                
+        self.client.on_message = combined_on_message
     
-    console.log('Device config:', config);
-} catch (error) {
-    console.error('Failed to get config:', error);
-}
-
-// デバイス制御コマンド
-try {
-    const result = await requestResponse.sendRequest('devices/actuator001/control', {
-        action: 'set_position',
-        position: 45,
-        speed: 'normal'
-    });
+    def send_request(self, request_topic: str, request_data: Dict[str, Any], 
+                    timeout: float = 30.0) -> Future:
+        """リクエスト送信（非同期）"""
+        correlation_id = self.generate_correlation_id()
+        response_topic = f"{self.response_topic_prefix}/{correlation_id}"
+        
+        # Futureオブジェクトを作成
+        future = Future()
+        self.pending_requests[correlation_id] = future
+        
+        # タイムアウト処理
+        def timeout_handler():
+            time.sleep(timeout)
+            if correlation_id in self.pending_requests:
+                future_obj = self.pending_requests.pop(correlation_id)
+                if not future_obj.done():
+                    future_obj.set_exception(TimeoutError(f"Request timeout after {timeout}s"))
+        
+        timeout_thread = threading.Thread(target=timeout_handler, daemon=True)
+        timeout_thread.start()
+        
+        # リクエストプロパティ設定
+        req_props = properties.Properties(properties.PacketTypes.PUBLISH)
+        req_props.ResponseTopic = response_topic
+        req_props.CorrelationData = correlation_id.encode()
+        req_props.UserProperty = [
+            ('request_type', 'api_call'),
+            ('client_version', '1.0.0'),
+            ('timestamp', str(int(time.time())))
+        ]
+        
+        # リクエスト送信
+        result = self.client.publish(
+            request_topic, 
+            json.dumps(request_data),
+            qos=1,
+            properties=req_props
+        )
+        
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            self.pending_requests.pop(correlation_id, None)
+            future.set_exception(Exception(f"Publish failed: {result.rc}"))
+            
+        return future
     
-    console.log('Control result:', result);
-} catch (error) {
-    console.error('Control command failed:', error);
-}
+    def send_request_sync(self, request_topic: str, request_data: Dict[str, Any], 
+                         timeout: float = 30.0) -> Dict[str, Any]:
+        """リクエスト送信（同期）"""
+        future = self.send_request(request_topic, request_data, timeout)
+        return future.result(timeout=timeout)
+    
+    def handle_response(self, topic: str, message):
+        """レスポンス処理"""
+        correlation_data = None
+        if message.properties and hasattr(message.properties, 'CorrelationData'):
+            correlation_data = message.properties.CorrelationData
+            
+        if not correlation_data:
+            return
+            
+        correlation_id = correlation_data.decode()
+        pending_request = self.pending_requests.pop(correlation_id, None)
+        
+        if pending_request and not pending_request.done():
+            try:
+                response_data = json.loads(message.payload.decode())
+                pending_request.set_result(response_data)
+            except json.JSONDecodeError as e:
+                pending_request.set_exception(ValueError(f"Invalid response format: {e}"))
+    
+    def generate_correlation_id(self) -> str:
+        """相関IDの生成"""
+        return f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+
+# 使用例
+def example_usage():
+    client = mqtt.Client(client_id="request_client", protocol=mqtt.MQTTv5)
+    client.connect('broker.example.com', 1883, 60)
+    client.loop_start()
+    
+    request_response = MQTTRequestResponse(client)
+    
+    try:
+        # デバイス設定取得
+        config = request_response.send_request_sync('devices/sensor001/get_config', {
+            'sections': ['network', 'sampling']
+        }, timeout=10.0)
+        
+        print('Device config:', config)
+        
+        # デバイス制御コマンド
+        result = request_response.send_request_sync('devices/actuator001/control', {
+            'action': 'set_position',
+            'position': 45,
+            'speed': 'normal'
+        }, timeout=15.0)
+        
+        print('Control result:', result)
+        
+    except TimeoutError as e:
+        print(f'Request timeout: {e}')
+    except Exception as e:
+        print(f'Request failed: {e}')
+    finally:
+        client.loop_stop()
+        client.disconnect()
+
+# 非同期使用例
+async def async_example_usage():
+    client = mqtt.Client(client_id="async_request_client", protocol=mqtt.MQTTv5)
+    client.connect('broker.example.com', 1883, 60)
+    client.loop_start()
+    
+    request_response = MQTTRequestResponse(client)
+    
+    try:
+        # 複数リクエストを並行実行
+        future1 = request_response.send_request('devices/sensor001/get_config', {
+            'sections': ['network']
+        })
+        
+        future2 = request_response.send_request('devices/sensor002/get_status', {})
+        
+        # 結果待ち
+        loop = asyncio.get_event_loop()
+        config = await loop.run_in_executor(None, future1.result, 10.0)
+        status = await loop.run_in_executor(None, future2.result, 10.0)
+        
+        print('Config:', config)
+        print('Status:', status)
+        
+    except Exception as e:
+        print(f'Async request failed: {e}')
+    finally:
+        client.loop_stop()
+        client.disconnect()
+
+if __name__ == "__main__":
+    example_usage()
 ```
 
 ### 7.8.2 サービス側の実装

@@ -66,229 +66,338 @@ aws iot attach-policy \
     --target "certificate-arn"
 ```
 
-#### Node.js デバイス実装
+#### Python デバイス実装
 
-```javascript
-const awsIot = require('aws-iot-device-sdk-v2');
-const { mqtt, io, iot } = awsIot;
+```python
+from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
+import json
+import time
+import threading
+from datetime import datetime
+from typing import Dict, Any, Callable, Optional
+import random
 
-class AWSIoTDevice {
-    constructor(options) {
-        this.thingName = options.thingName;
-        this.endpoint = options.endpoint;
-        this.region = options.region;
-        this.connection = null;
+class AWSIoTDevice:
+    def __init__(self, thing_name: str, endpoint: str, cert_path: str, key_path: str, 
+                 ca_path: str = "./AmazonRootCA1.pem"):
+        self.thing_name = thing_name
+        self.endpoint = endpoint
+        self.cert_path = cert_path
+        self.key_path = key_path
+        self.ca_path = ca_path
         
-        // 証明書設定
-        this.tlsContext = io.TlsContextOptions.create_client_with_mtls_from_path(
-            options.certPath,    // certificate.pem.crt
-            options.keyPath      // private.pem.key
-        );
-    }
+        # AWS IoT MQTT クライアント初期化
+        self.client = AWSIoTMQTTClient(thing_name)
+        self.client.configureEndpoint(endpoint, 8883)
+        self.client.configureCredentials(ca_path, key_path, cert_path)
+        
+        # 接続設定
+        self.client.configureAutoReconnectBackoffTime(1, 32, 20)
+        self.client.configureOfflinePublishQueueing(-1)  # Infinite offline publishing
+        self.client.configureDrainingFrequency(2)  # Draining frequency in Hz
+        self.client.configureConnectDisconnectTimeout(10)  # 10 sec
+        self.client.configureMQTTOperationTimeout(5)  # 5 sec
+        
+        self.connected = False
+        
+    def connect(self) -> bool:
+        """AWS IoT Core に接続"""
+        try:
+            result = self.client.connect()
+            if result:
+                self.connected = True
+                print(f"Connected to AWS IoT Core: {self.thing_name}")
+                return True
+            else:
+                print("Connection failed")
+                return False
+        except Exception as error:
+            print(f"Connection error: {error}")
+            return False
     
-    async connect() {
-        const config = iot.AwsIotMqttConnectionConfigBuilder.new_mtls_builder_from_path(
-            this.certPath,
-            this.keyPath
-        )
-        .with_certificate_authority_from_path(null, './AmazonRootCA1.pem')
-        .with_clean_session(false)
-        .with_client_id(this.thingName)
-        .with_endpoint(this.endpoint)
-        .build();
-        
-        const client = new mqtt.MqttClient();
-        this.connection = client.new_connection(config);
-        
-        this.connection.on('connect', () => {
-            console.log(`Connected to AWS IoT Core: ${this.thingName}`);
-        });
-        
-        this.connection.on('error', (error) => {
-            console.error('Connection error:', error);
-        });
-        
-        await this.connection.connect();
-        return this.connection;
-    }
+    def disconnect(self):
+        """接続を切断"""
+        if self.connected:
+            self.client.disconnect()
+            self.connected = False
+            print("Disconnected from AWS IoT Core")
     
-    async publishSensorData(sensorType, value, metadata = {}) {
-        const topic = `sensors/${this.thingName}/${sensorType}`;
-        const message = {
-            deviceId: this.thingName,
-            sensorType: sensorType,
-            value: value,
-            timestamp: new Date().toISOString(),
-            metadata: metadata
-        };
-        
-        await this.connection.publish(topic, JSON.stringify(message), mqtt.QoS.AtLeastOnce);
-        console.log(`Published to ${topic}:`, message);
-    }
-    
-    async subscribeToCommands(callback) {
-        const topic = `commands/${this.thingName}/+`;
-        
-        await this.connection.subscribe(topic, mqtt.QoS.AtLeastOnce, (topic, payload) => {
-            try {
-                const message = JSON.parse(payload.toString());
-                const command = topic.split('/').pop();
-                callback(command, message);
-            } catch (error) {
-                console.error('Failed to parse command:', error);
-            }
-        });
-        
-        console.log(`Subscribed to commands: ${topic}`);
-    }
-    
-    async updateDeviceShadow(state) {
-        const shadowTopic = `$aws/things/${this.thingName}/shadow/update`;
-        const shadowMessage = {
-            state: {
-                reported: state
-            }
-        };
-        
-        await this.connection.publish(shadowTopic, JSON.stringify(shadowMessage), mqtt.QoS.AtLeastOnce);
-        console.log('Device shadow updated:', state);
-    }
-    
-    async subscribeShadowUpdates(callback) {
-        const acceptedTopic = `$aws/things/${this.thingName}/shadow/update/accepted`;
-        const deltasTopic = `$aws/things/${this.thingName}/shadow/update/delta`;
-        
-        // シャドウ更新成功通知
-        await this.connection.subscribe(acceptedTopic, mqtt.QoS.AtLeastOnce, (topic, payload) => {
-            const message = JSON.parse(payload.toString());
-            callback('accepted', message);
-        });
-        
-        // 差分検出通知
-        await this.connection.subscribe(deltasTopic, mqtt.QoS.AtLeastOnce, (topic, payload) => {
-            const message = JSON.parse(payload.toString());
-            callback('delta', message);
-        });
-    }
-}
-
-// 使用例
-async function main() {
-    const device = new AWSIoTDevice({
-        thingName: 'temperature-sensor-001',
-        endpoint: 'your-endpoint.iot.us-east-1.amazonaws.com',
-        region: 'us-east-1',
-        certPath: './certificate.pem.crt',
-        keyPath: './private.pem.key'
-    });
-    
-    await device.connect();
-    
-    // コマンド受信設定
-    await device.subscribeToCommands((command, message) => {
-        console.log(`Received command ${command}:`, message);
-        
-        switch (command) {
-            case 'calibrate':
-                // キャリブレーション実行
-                console.log('Executing calibration...');
-                break;
-            case 'set_interval':
-                // サンプリング間隔変更
-                console.log(`Setting interval to ${message.interval} seconds`);
-                break;
+    def publish_sensor_data(self, sensor_type: str, value: float, metadata: Dict[str, Any] = None) -> bool:
+        """センサーデータをパブリッシュ"""
+        if not self.connected:
+            print("Not connected to AWS IoT Core")
+            return False
+            
+        topic = f"sensors/{self.thing_name}/{sensor_type}"
+        message = {
+            "deviceId": self.thing_name,
+            "sensorType": sensor_type,
+            "value": value,
+            "timestamp": datetime.now().isoformat(),
+            "metadata": metadata or {}
         }
-    });
+        
+        try:
+            self.client.publish(topic, json.dumps(message), 1)  # QoS 1
+            print(f"Published to {topic}: {message}")
+            return True
+        except Exception as e:
+            print(f"Failed to publish sensor data: {e}")
+            return False
     
-    // シャドウ更新監視
-    await device.subscribeShadowUpdates((type, message) => {
-        if (type === 'delta') {
-            console.log('Shadow delta received:', message.state);
-            // 設定変更を適用
-            device.updateDeviceShadow(message.state);
+    def subscribe_to_commands(self, callback: Callable[[str, Dict[str, Any]], None]):
+        """コマンドトピックを購読"""
+        topic = f"commands/{self.thing_name}/+"
+        
+        def command_callback(client, userdata, message):
+            try:
+                payload = json.loads(message.payload.decode())
+                command = message.topic.split('/')[-1]
+                callback(command, payload)
+            except Exception as error:
+                print(f"Failed to parse command: {error}")
+        
+        self.client.subscribe(topic, 1, command_callback)
+        print(f"Subscribed to commands: {topic}")
+    
+    def update_device_shadow(self, state: Dict[str, Any]) -> bool:
+        """デバイスシャドウを更新"""
+        if not self.connected:
+            return False
+            
+        shadow_topic = f"$aws/things/{self.thing_name}/shadow/update"
+        shadow_message = {
+            "state": {
+                "reported": state
+            }
         }
-    });
+        
+        try:
+            self.client.publish(shadow_topic, json.dumps(shadow_message), 1)
+            print(f"Device shadow updated: {state}")
+            return True
+        except Exception as e:
+            print(f"Failed to update device shadow: {e}")
+            return False
     
-    // 定期的なセンサーデータ送信
-    setInterval(async () => {
-        const temperature = 20 + Math.random() * 10;
-        const humidity = 40 + Math.random() * 20;
+    def subscribe_shadow_updates(self, callback: Callable[[str, Dict[str, Any]], None]):
+        """シャドウ更新を購読"""
+        accepted_topic = f"$aws/things/{self.thing_name}/shadow/update/accepted"
+        delta_topic = f"$aws/things/{self.thing_name}/shadow/update/delta"
         
-        await device.publishSensorData('temperature', temperature, {
-            unit: 'celsius',
-            accuracy: '±0.5°C'
-        });
+        def shadow_accepted_callback(client, userdata, message):
+            try:
+                payload = json.loads(message.payload.decode())
+                callback('accepted', payload)
+            except Exception as e:
+                print(f"Failed to parse shadow accepted message: {e}")
         
-        await device.publishSensorData('humidity', humidity, {
-            unit: 'percent',
-            accuracy: '±2%'
-        });
-    }, 30000);
-}
+        def shadow_delta_callback(client, userdata, message):
+            try:
+                payload = json.loads(message.payload.decode())
+                callback('delta', payload)
+            except Exception as e:
+                print(f"Failed to parse shadow delta message: {e}")
+        
+        self.client.subscribe(accepted_topic, 1, shadow_accepted_callback)
+        self.client.subscribe(delta_topic, 1, shadow_delta_callback)
+        print(f"Subscribed to shadow updates")
 
-main().catch(console.error);
+# 使用例
+def main():
+    device = AWSIoTDevice(
+        thing_name='temperature-sensor-001',
+        endpoint='your-endpoint.iot.us-east-1.amazonaws.com',
+        cert_path='./certificate.pem.crt',
+        key_path='./private.pem.key'
+    )
+    
+    if not device.connect():
+        print("Failed to connect to AWS IoT Core")
+        return
+    
+    # コマンド受信設定
+    def command_handler(command: str, message: Dict[str, Any]):
+        print(f"Received command {command}: {message}")
+        
+        if command == 'calibrate':
+            print('Executing calibration...')
+            # キャリブレーション実行
+        elif command == 'set_interval':
+            interval = message.get('interval', 30)
+            print(f'Setting interval to {interval} seconds')
+            # サンプリング間隔変更
+    
+    device.subscribe_to_commands(command_handler)
+    
+    # シャドウ更新監視
+    def shadow_handler(update_type: str, message: Dict[str, Any]):
+        if update_type == 'delta' and 'state' in message:
+            print(f'Shadow delta received: {message["state"]}')
+            # 設定変更を適用
+            device.update_device_shadow(message['state'])
+        elif update_type == 'accepted':
+            print('Shadow update accepted')
+    
+    device.subscribe_shadow_updates(shadow_handler)
+    
+    # 定期的なセンサーデータ送信
+    def send_sensor_data():
+        while device.connected:
+            temperature = 20 + random.random() * 10
+            humidity = 40 + random.random() * 20
+            
+            device.publish_sensor_data('temperature', temperature, {
+                'unit': 'celsius',
+                'accuracy': '±0.5°C'
+            })
+            
+            device.publish_sensor_data('humidity', humidity, {
+                'unit': 'percent',
+                'accuracy': '±2%'
+            })
+            
+            time.sleep(30)
+    
+    # センサーデータ送信を別スレッドで開始
+    sensor_thread = threading.Thread(target=send_sensor_data, daemon=True)
+    sensor_thread.start()
+    
+    try:
+        # メインループ
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        device.disconnect()
+
+if __name__ == "__main__":
+    main()
 ```
 
 ### 8.1.2 IoT Rules Engine 活用
 
-```javascript
-// CloudFormation テンプレートによるRules Engine設定
-const ruleTemplate = {
-    AWSTemplateFormatVersion: '2010-09-09',
-    Resources: {
-        TemperatureAlertRule: {
-            Type: 'AWS::IoT::TopicRule',
-            Properties: {
-                RuleName: 'TemperatureAlertRule',
-                TopicRulePayload: {
-                    Sql: `
-                        SELECT 
-                            deviceId,
-                            sensorType,
-                            value as temperature,
-                            timestamp,
-                            'HIGH_TEMPERATURE' as alertType
-                        FROM 'sensors/+/temperature' 
-                        WHERE value > 35
-                    `,
-                    Actions: [
-                        {
-                            Lambda: {
-                                FunctionArn: 'arn:aws:lambda:region:account:function:ProcessHighTemperature'
-                            }
+```python
+# Boto3を使用したIoT Rules Engineの設定
+import boto3
+import json
+
+def create_temperature_alert_rule():
+    """温度アラートルールの作成"""
+    iot_client = boto3.client('iot')
+    
+    rule_payload = {
+        'sql': '''
+            SELECT 
+                deviceId,
+                sensorType,
+                value as temperature,
+                timestamp,
+                'HIGH_TEMPERATURE' as alertType
+            FROM 'sensors/+/temperature' 
+            WHERE value > 35
+        ''',
+        'actions': [
+            {
+                'lambda': {
+                    'functionArn': 'arn:aws:lambda:region:account:function:ProcessHighTemperature'
+                }
+            },
+            {
+                'sns': {
+                    'targetArn': 'arn:aws:sns:region:account:temperature-alerts',
+                    'messageFormat': 'JSON'
+                }
+            },
+            {
+                'dynamoDBv2': {
+                    'tableName': 'TemperatureAlerts',
+                    'roleArn': 'arn:aws:iam::account:role/IoTRuleRole',
+                    'putItem': {
+                        'deviceId': {
+                            'S': '${deviceId}'
                         },
-                        {
-                            Sns: {
-                                TargetArn: 'arn:aws:sns:region:account:temperature-alerts',
-                                MessageFormat: 'JSON'
-                            }
+                        'timestamp': {
+                            'S': '${timestamp}'
                         },
-                        {
-                            DynamoDBv2: {
-                                TableName: 'TemperatureAlerts',
-                                RoleArn: 'arn:aws:iam::account:role/IoTRuleRole',
-                                PutItem: {
-                                    'deviceId': {
-                                        S: '${deviceId}'
-                                    },
-                                    'timestamp': {
-                                        S: '${timestamp}'
-                                    },
-                                    'temperature': {
-                                        N: '${temperature}'
-                                    },
-                                    'alertType': {
-                                        S: '${alertType}'
-                                    }
-                                }
-                            }
+                        'temperature': {
+                            'N': '${temperature}'
+                        },
+                        'alertType': {
+                            'S': '${alertType}'
                         }
-                    ]
+                    }
                 }
             }
-        }
+        ],
+        'ruleDisabled': False,
+        'awsIotSqlVersion': '2016-03-23'
     }
-};
+    
+    try:
+        response = iot_client.create_topic_rule(
+            ruleName='TemperatureAlertRule',
+            topicRulePayload=rule_payload
+        )
+        print("IoT Rule created successfully")
+        return response
+    except Exception as e:
+        print(f"Failed to create IoT rule: {e}")
+        return None
+
+# CloudFormation テンプレート（YAML形式）
+cloudformation_template = '''
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'MQTT Temperature Alert Rule'
+
+Resources:
+  TemperatureAlertRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: TemperatureAlertRule
+      TopicRulePayload:
+        Sql: |
+          SELECT 
+            deviceId,
+            sensorType,
+            value as temperature,
+            timestamp,
+            'HIGH_TEMPERATURE' as alertType
+          FROM 'sensors/+/temperature' 
+          WHERE value > 35
+        Actions:
+          - Lambda:
+              FunctionArn: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:ProcessHighTemperature'
+          - Sns:
+              TargetArn: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:temperature-alerts'
+              MessageFormat: JSON
+          - DynamoDBv2:
+              TableName: TemperatureAlerts
+              RoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/IoTRuleRole'
+              PutItem:
+                deviceId:
+                  S: '${deviceId}'
+                timestamp:
+                  S: '${timestamp}'
+                temperature:
+                  N: '${temperature}'
+                alertType:
+                  S: '${alertType}'
+        RuleDisabled: false
+        AwsIotSqlVersion: '2016-03-23'
+
+Outputs:
+  RuleName:
+    Description: 'Name of the created IoT rule'
+    Value: !Ref TemperatureAlertRule
+    Export:
+      Name: !Sub '${AWS::StackName}-RuleName'
+'''
+
+# 使用例
+if __name__ == "__main__":
+    create_temperature_alert_rule()
 ```
 
 ### 8.1.3 Device Shadow との連携
@@ -368,190 +477,206 @@ print("Current device status:", current_status)
 
 ### 8.2.1 接続文字列とSAS認証
 
-```javascript
-const { Client } = require('azure-iot-device');
-const { Mqtt } = require('azure-iot-device-mqtt');
+```python
+from azure.iot.device import IoTHubDeviceClient, Message, MethodResponse
+import json
+import asyncio
+import time
+import threading
+from datetime import datetime
+from typing import Dict, Any, Callable
+import psutil
+import random
 
-class AzureIoTDevice {
-    constructor(connectionString) {
-        this.connectionString = connectionString;
-        this.client = Client.fromConnectionString(connectionString, Mqtt);
-        this.setupEventHandlers();
-    }
+class AzureIoTDevice:
+    def __init__(self, connection_string: str):
+        self.connection_string = connection_string
+        self.client = IoTHubDeviceClient.create_from_connection_string(connection_string)
+        self.connected = False
+        self.setup_event_handlers()
     
-    setupEventHandlers() {
-        this.client.on('connect', () => {
-            console.log('Connected to Azure IoT Hub');
-        });
+    def setup_event_handlers(self):
+        """イベントハンドラーの設定"""
         
-        this.client.on('error', (err) => {
-            console.error('Connection error:', err);
-        });
-        
-        this.client.on('disconnect', () => {
-            console.log('Disconnected from Azure IoT Hub');
-        });
-        
-        // C2D (Cloud-to-Device) メッセージ受信
-        this.client.on('message', (message) => {
-            console.log('C2D Message received:');
-            console.log('- Data:', message.data.toString());
-            console.log('- Properties:', message.properties);
+        # C2D (Cloud-to-Device) メッセージ受信ハンドラー
+        async def message_handler(message):
+            print('C2D Message received:')
+            print(f'- Data: {message.data.decode()}')
+            print(f'- Properties: {message.custom_properties}')
             
-            // メッセージ処理完了通知
-            this.client.complete(message, (err) => {
-                if (err) {
-                    console.error('Failed to complete message:', err);
-                } else {
-                    console.log('Message completed');
-                }
-            });
-        });
+            # メッセージ処理完了通知
+            try:
+                await self.client.complete_message(message)
+                print('Message completed')
+            except Exception as e:
+                print(f'Failed to complete message: {e}')
         
-        // Direct Methods の受信
-        this.client.onDeviceMethod('reboot', (request, response) => {
-            console.log('Reboot method called');
+        self.client.on_message_received = message_handler
+        
+        # Direct Methods のハンドラー設定
+        async def reboot_method_handler(method_request):
+            print('Reboot method called')
+            print(f'Payload: {method_request.payload}')
             
-            // リブート処理のシミュレーション
-            setTimeout(() => {
-                response.send(200, 'Reboot completed', (err) => {
-                    if (err) {
-                        console.error('Failed to send method response:', err);
-                    }
-                });
-            }, 2000);
-        });
-        
-        this.client.onDeviceMethod('getStatus', (request, response) => {
-            const status = {
-                uptime: process.uptime(),
-                memory: process.memoryUsage(),
-                timestamp: new Date().toISOString()
-            };
+            # リブート処理のシミュレーション
+            await asyncio.sleep(2)
             
-            response.send(200, status, (err) => {
-                if (err) {
-                    console.error('Failed to send status response:', err);
-                }
-            });
-        });
-    }
-    
-    async connect() {
-        return new Promise((resolve, reject) => {
-            this.client.open((err) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve();
-                }
-            });
-        });
-    }
-    
-    async sendTelemetry(data) {
-        const message = new Message(JSON.stringify(data));
+            method_response = MethodResponse.create_from_method_request(
+                method_request, 200, "Reboot completed"
+            )
+            await self.client.send_method_response(method_response)
         
-        // メッセージプロパティの設定
-        message.properties.add('temperatureAlert', data.temperature > 30 ? 'true' : 'false');
-        message.properties.add('deviceType', 'sensor');
-        
-        return new Promise((resolve, reject) => {
-            this.client.sendEvent(message, (err) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    console.log('Telemetry sent:', data);
-                    resolve();
-                }
-            });
-        });
-    }
-    
-    async updateReportedProperties(properties) {
-        return new Promise((resolve, reject) => {
-            this.client.getTwin((err, twin) => {
-                if (err) {
-                    reject(err);
-                    return;
-                }
-                
-                twin.properties.reported.update(properties, (err) => {
-                    if (err) {
-                        reject(err);
-                    } else {
-                        console.log('Reported properties updated:', properties);
-                        resolve();
-                    }
-                });
-            });
-        });
-    }
-    
-    subscribeToDesiredProperties(callback) {
-        this.client.getTwin((err, twin) => {
-            if (err) {
-                console.error('Failed to get twin:', err);
-                return;
+        async def get_status_method_handler(method_request):
+            status = {
+                'uptime': time.time() - psutil.boot_time(),
+                'memory': dict(psutil.virtual_memory()._asdict()),
+                'cpu_percent': psutil.cpu_percent(),
+                'timestamp': datetime.now().isoformat()
             }
             
-            twin.on('properties.desired', (delta) => {
-                console.log('Desired properties update:', delta);
-                callback(delta);
-            });
-        });
-    }
-}
-
-// 使用例
-const { Message } = require('azure-iot-device');
-
-async function main() {
-    // 接続文字列（Azure ポータルから取得）
-    const connectionString = 'HostName=your-hub.azure-devices.net;DeviceId=your-device;SharedAccessKey=your-key';
-    
-    const device = new AzureIoTDevice(connectionString);
-    await device.connect();
-    
-    // Desired Properties の監視
-    device.subscribeToDesiredProperties(async (delta) => {
-        // 設定変更をReported Propertiesに反映
-        await device.updateReportedProperties(delta);
-    });
-    
-    // 定期的なテレメトリ送信
-    setInterval(async () => {
-        const telemetryData = {
-            temperature: 20 + Math.random() * 15,
-            humidity: 40 + Math.random() * 30,
-            pressure: 1000 + Math.random() * 100,
-            timestamp: new Date().toISOString()
-        };
+            method_response = MethodResponse.create_from_method_request(
+                method_request, 200, status
+            )
+            await self.client.send_method_response(method_response)
         
-        try {
-            await device.sendTelemetry(telemetryData);
-        } catch (error) {
-            console.error('Failed to send telemetry:', error);
-        }
-    }, 10000);
+        # Direct Methods の登録
+        self.client.on_method_request_received = self.create_method_dispatcher({
+            'reboot': reboot_method_handler,
+            'getStatus': get_status_method_handler
+        })
     
-    // デバイス状態の定期更新
-    setInterval(async () => {
-        const reportedProperties = {
-            connectivity: 'connected',
-            lastSeen: new Date().toISOString(),
-            batteryLevel: Math.floor(Math.random() * 100)
-        };
+    def create_method_dispatcher(self, method_handlers: Dict[str, Callable]):
+        """Direct Method のディスパッチャー作成"""
+        async def method_dispatcher(method_request):
+            method_name = method_request.name
+            if method_name in method_handlers:
+                await method_handlers[method_name](method_request)
+            else:
+                print(f'Unknown method: {method_name}')
+                method_response = MethodResponse.create_from_method_request(
+                    method_request, 404, f"Method {method_name} not found"
+                )
+                await self.client.send_method_response(method_response)
         
-        try {
-            await device.updateReportedProperties(reportedProperties);
-        } catch (error) {
-            console.error('Failed to update properties:', error);
-        }
-    }, 60000);
-}
+        return method_dispatcher
+    
+    async def connect(self):
+        """Azure IoT Hub に接続"""
+        try:
+            await self.client.connect()
+            self.connected = True
+            print('Connected to Azure IoT Hub')
+        except Exception as e:
+            print(f'Connection error: {e}')
+            raise
+    
+    async def disconnect(self):
+        """接続を切断"""
+        if self.connected:
+            await self.client.disconnect()
+            self.connected = False
+            print('Disconnected from Azure IoT Hub')
+    
+    async def send_telemetry(self, data: Dict[str, Any]):
+        """テレメトリデータを送信"""
+        message = Message(json.dumps(data))
+        
+        # メッセージプロパティの設定
+        message.custom_properties['temperatureAlert'] = 'true' if data.get('temperature', 0) > 30 else 'false'
+        message.custom_properties['deviceType'] = 'sensor'
+        message.custom_properties['timestamp'] = datetime.now().isoformat()
+        
+        try:
+            await self.client.send_message(message)
+            print(f'Telemetry sent: {data}')
+        except Exception as e:
+            print(f'Failed to send telemetry: {e}')
+            raise
+    
+    async def update_reported_properties(self, properties: Dict[str, Any]):
+        """Reported Properties を更新"""
+        try:
+            await self.client.patch_twin_reported_properties(properties)
+            print(f'Reported properties updated: {properties}')
+        except Exception as e:
+            print(f'Failed to update reported properties: {e}')
+            raise
+    
+    async def subscribe_to_desired_properties(self, callback: Callable[[Dict[str, Any]], None]):
+        """Desired Properties の変更を監視"""
+        def twin_patch_handler(twin_patch):
+            print(f'Desired properties update: {twin_patch}')
+            # コールバックを非同期で実行
+            asyncio.create_task(callback(twin_patch))
+        
+        self.client.on_twin_desired_properties_patch_received = twin_patch_handler
 
-main().catch(console.error);
+# 使用例
+async def main():
+    # 接続文字列（Azure ポータルから取得）
+    connection_string = 'HostName=your-hub.azure-devices.net;DeviceId=your-device;SharedAccessKey=your-key'
+    
+    device = AzureIoTDevice(connection_string)
+    await device.connect()
+    
+    # Desired Properties の監視
+    async def desired_properties_handler(delta):
+        # 設定変更をReported Propertiesに反映
+        await device.update_reported_properties(delta)
+    
+    await device.subscribe_to_desired_properties(desired_properties_handler)
+    
+    # 定期的なテレメトリ送信タスク
+    async def send_telemetry_loop():
+        while device.connected:
+            telemetry_data = {
+                'temperature': 20 + random.random() * 15,
+                'humidity': 40 + random.random() * 30,
+                'pressure': 1000 + random.random() * 100,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            try:
+                await device.send_telemetry(telemetry_data)
+            except Exception as error:
+                print(f'Failed to send telemetry: {error}')
+            
+            await asyncio.sleep(10)
+    
+    # デバイス状態の定期更新タスク
+    async def update_properties_loop():
+        while device.connected:
+            reported_properties = {
+                'connectivity': 'connected',
+                'lastSeen': datetime.now().isoformat(),
+                'batteryLevel': random.randint(0, 100),
+                'cpuUsage': psutil.cpu_percent(),
+                'memoryUsage': psutil.virtual_memory().percent
+            }
+            
+            try:
+                await device.update_reported_properties(reported_properties)
+            except Exception as error:
+                print(f'Failed to update properties: {error}')
+            
+            await asyncio.sleep(60)
+    
+    # バックグラウンドタスクを開始
+    telemetry_task = asyncio.create_task(send_telemetry_loop())
+    properties_task = asyncio.create_task(update_properties_loop())
+    
+    try:
+        # メインループ
+        await asyncio.gather(telemetry_task, properties_task)
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        telemetry_task.cancel()
+        properties_task.cancel()
+    finally:
+        await device.disconnect()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ### 8.2.2 IoT Edge との連携
@@ -586,171 +711,240 @@ certificates:
 
 **カスタムIoT Edgeモジュール:**
 
-```javascript
-// modules/mqtt-bridge/app.js
-const { ModuleClient } = require('azure-iot-device');
-const { Mqtt } = require('azure-iot-device-mqtt');
-const mqtt = require('mqtt');
+```python
+# modules/mqtt-bridge/app.py
+from azure.iot.device import IoTHubModuleClient, Message
+import paho.mqtt.client as mqtt
+import asyncio
+import json
+import signal
+import sys
+from datetime import datetime
+from typing import Dict, Any, Optional
 
-class MQTTBridgeModule {
-    constructor() {
-        this.moduleClient = null;
-        this.localMqttClient = null;
-        this.bridgeConfig = {
-            localBroker: 'mqtt://localhost:1883',
-            topicMapping: {
+class MQTTBridgeModule:
+    def __init__(self):
+        self.module_client: Optional[IoTHubModuleClient] = None
+        self.local_mqtt_client: Optional[mqtt.Client] = None
+        self.bridge_config = {
+            'local_broker': 'mqtt://localhost:1883',
+            'topic_mapping': {
                 'local/sensors/+/data': 'cloud/sensors/{deviceId}/telemetry',
                 'cloud/commands/+': 'local/commands/{deviceId}'
             }
-        };
-    }
+        }
+        self.running = True
     
-    async initialize() {
-        // IoT Edge Module Client の初期化
-        this.moduleClient = await ModuleClient.fromEnvironment(Mqtt);
-        await this.moduleClient.open();
-        
-        console.log('IoT Edge module connected');
-        
-        // ローカルMQTTブローカーへの接続
-        this.localMqttClient = mqtt.connect(this.bridgeConfig.localBroker);
-        
-        this.localMqttClient.on('connect', () => {
-            console.log('Connected to local MQTT broker');
-            this.setupLocalSubscriptions();
-        });
-        
-        // クラウドからのメッセージ受信
-        this.moduleClient.on('inputMessage', (inputName, message) => {
-            this.handleCloudMessage(inputName, message);
-        });
-        
-        this.setupModuleTwin();
-    }
+    async def initialize(self):
+        """モジュールの初期化"""
+        try:
+            # IoT Edge Module Client の初期化
+            self.module_client = IoTHubModuleClient.create_from_edge_environment()
+            await self.module_client.connect()
+            
+            print('IoT Edge module connected')
+            
+            # ローカルMQTTブローカーへの接続
+            self.setup_local_mqtt_client()
+            
+            # クラウドからのメッセージ受信設定
+            self.module_client.on_message_received = self.handle_cloud_message
+            
+            # Module Twin の設定
+            await self.setup_module_twin()
+            
+        except Exception as e:
+            print(f'Failed to initialize module: {e}')
+            raise
     
-    setupLocalSubscriptions() {
-        // ローカルMQTTトピックの購読
-        Object.keys(this.bridgeConfig.topicMapping).forEach(localTopic => {
-            if (localTopic.startsWith('local/')) {
-                this.localMqttClient.subscribe(localTopic, (err) => {
-                    if (!err) {
-                        console.log(`Subscribed to local topic: ${localTopic}`);
-                    }
-                });
+    def setup_local_mqtt_client(self):
+        """ローカルMQTTクライアントの設定"""
+        broker_url = self.bridge_config['local_broker'].replace('mqtt://', '')
+        host, port = (broker_url.split(':') + ['1883'])[:2]
+        port = int(port)
+        
+        self.local_mqtt_client = mqtt.Client(client_id="iot-edge-bridge")
+        
+        def on_connect(client, userdata, flags, rc):
+            if rc == 0:
+                print('Connected to local MQTT broker')
+                self.setup_local_subscriptions()
+            else:
+                print(f'Failed to connect to local MQTT broker: {rc}')
+        
+        def on_message(client, userdata, message):
+            asyncio.create_task(self.handle_local_message(message.topic, message.payload))
+        
+        self.local_mqtt_client.on_connect = on_connect
+        self.local_mqtt_client.on_message = on_message
+        
+        self.local_mqtt_client.connect(host, port, 60)
+        self.local_mqtt_client.loop_start()
+    
+    def setup_local_subscriptions(self):
+        """ローカルMQTTトピックの購読"""
+        for local_topic in self.bridge_config['topic_mapping'].keys():
+            if local_topic.startswith('local/'):
+                result = self.local_mqtt_client.subscribe(local_topic, qos=1)
+                if result[0] == mqtt.MQTT_ERR_SUCCESS:
+                    print(f'Subscribed to local topic: {local_topic}')
+                else:
+                    print(f'Failed to subscribe to {local_topic}')
+    
+    async def handle_local_message(self, topic: str, payload: bytes):
+        """ローカルメッセージをクラウドに転送"""
+        try:
+            device_id = self.extract_device_id(topic)
+            cloud_topic = self.map_to_cloud_topic(topic, device_id)
+            
+            if cloud_topic:
+                # Azure IoT メッセージを作成
+                output_message = Message(payload)
+                output_message.custom_properties['source'] = 'local-mqtt'
+                output_message.custom_properties['originalTopic'] = topic
+                output_message.custom_properties['deviceId'] = device_id
+                output_message.custom_properties['timestamp'] = datetime.now().isoformat()
+                
+                # クラウドに送信
+                await self.module_client.send_message_to_output(
+                    output_message, 'upstreamOutput'
+                )
+                print(f'Bridged message from {topic} to cloud')
+                
+        except Exception as e:
+            print(f'Error handling local message: {e}')
+    
+    async def handle_cloud_message(self, message):
+        """クラウドメッセージをローカルに転送"""
+        try:
+            print(f'Received cloud message')
+            
+            # メッセージプロパティから情報取得
+            device_id = message.custom_properties.get('deviceId')
+            target_topic = message.custom_properties.get('targetTopic')
+            
+            if device_id and target_topic:
+                local_topic = target_topic.replace('{deviceId}', device_id)
+                
+                # ローカルMQTTブローカーにパブリッシュ
+                result = self.local_mqtt_client.publish(
+                    local_topic, 
+                    message.data, 
+                    qos=1
+                )
+                
+                if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                    print(f'Bridged message from cloud to {local_topic}')
+                else:
+                    print(f'Failed to publish to local topic: {result.rc}')
+            
+            # メッセージ完了通知
+            await self.module_client.complete_message(message)
+            
+        except Exception as e:
+            print(f'Error handling cloud message: {e}')
+    
+    async def setup_module_twin(self):
+        """Module Twin の設定"""
+        try:
+            # Desired Properties の監視
+            def twin_patch_handler(twin_patch):
+                print(f'Module twin desired properties update: {twin_patch}')
+                self.update_bridge_config(twin_patch)
+            
+            self.module_client.on_twin_desired_properties_patch_received = twin_patch_handler
+            
+            # Reported Properties の更新
+            reported_properties = {
+                'status': 'running',
+                'lastStartTime': datetime.now().isoformat(),
+                'version': '1.0.0',
+                'bridgeConfig': self.bridge_config
             }
-        });
-        
-        this.localMqttClient.on('message', (topic, message) => {
-            this.handleLocalMessage(topic, message);
-        });
-    }
-    
-    handleLocalMessage(topic, message) {
-        // ローカルメッセージをクラウドに転送
-        const deviceId = this.extractDeviceId(topic);
-        const cloudTopic = this.mapToCloudTopic(topic, deviceId);
-        
-        if (cloudTopic) {
-            const outputMessage = new Message(message);
-            outputMessage.properties.add('source', 'local-mqtt');
-            outputMessage.properties.add('originalTopic', topic);
-            outputMessage.properties.add('deviceId', deviceId);
             
-            this.moduleClient.sendOutputEvent('upstreamOutput', outputMessage, (err) => {
-                if (err) {
-                    console.error('Failed to send message to cloud:', err);
-                } else {
-                    console.log(`Bridged message from ${topic} to cloud`);
-                }
-            });
-        }
-    }
+            await self.module_client.patch_twin_reported_properties(reported_properties)
+            print('Module twin reported properties updated')
+            
+        except Exception as e:
+            print(f'Failed to setup module twin: {e}')
     
-    handleCloudMessage(inputName, message) {
-        // クラウドメッセージをローカルに転送
-        console.log(`Received cloud message on ${inputName}`);
+    def update_bridge_config(self, delta: Dict[str, Any]):
+        """ブリッジ設定の更新"""
+        if 'topicMapping' in delta:
+            self.bridge_config['topic_mapping'].update(delta['topicMapping'])
+            print('Updated topic mapping configuration')
+            # 新しいトピックマッピングで購読を再設定
+            self.setup_local_subscriptions()
+    
+    def extract_device_id(self, topic: str) -> str:
+        """トピックからデバイスIDを抽出"""
+        parts = topic.split('/')
+        return parts[2] if len(parts) > 2 else 'unknown'
+    
+    def map_to_cloud_topic(self, local_topic: str, device_id: str) -> Optional[str]:
+        """ローカルトピックをクラウドトピックにマッピング"""
+        # ワイルドカード部分を置換してマッチング
+        for pattern, cloud_template in self.bridge_config['topic_mapping'].items():
+            if self.topic_matches_pattern(local_topic, pattern):
+                return cloud_template.replace('{deviceId}', device_id)
+        return None
+    
+    def topic_matches_pattern(self, topic: str, pattern: str) -> bool:
+        """トピックがパターンにマッチするかチェック"""
+        topic_parts = topic.split('/')
+        pattern_parts = pattern.split('/')
         
-        const deviceId = message.properties.propertyList.find(p => p.key === 'deviceId')?.value;
-        const targetTopic = message.properties.propertyList.find(p => p.key === 'targetTopic')?.value;
+        if len(topic_parts) != len(pattern_parts):
+            return False
         
-        if (deviceId && targetTopic) {
-            const localTopic = targetTopic.replace('{deviceId}', deviceId);
-            
-            this.localMqttClient.publish(localTopic, message.data, (err) => {
-                if (!err) {
-                    console.log(`Bridged message from cloud to ${localTopic}`);
-                }
-            });
-        }
+        for t_part, p_part in zip(topic_parts, pattern_parts):
+            if p_part != '+' and p_part != t_part:
+                return False
         
-        this.moduleClient.complete(message);
-    }
+        return True
     
-    setupModuleTwin() {
-        this.moduleClient.getTwin((err, twin) => {
-            if (err) {
-                console.error('Failed to get module twin:', err);
-                return;
-            }
-            
-            // Desired Properties の監視
-            twin.on('properties.desired', (delta) => {
-                console.log('Module twin desired properties update:', delta);
-                this.updateBridgeConfig(delta);
-            });
-            
-            // Reported Properties の更新
-            const reportedProperties = {
-                status: 'running',
-                lastStartTime: new Date().toISOString(),
-                version: '1.0.0'
-            };
-            
-            twin.properties.reported.update(reportedProperties, (err) => {
-                if (err) {
-                    console.error('Failed to update reported properties:', err);
-                }
-            });
-        });
-    }
-    
-    updateBridgeConfig(delta) {
-        if (delta.topicMapping) {
-            this.bridgeConfig.topicMapping = { ...this.bridgeConfig.topicMapping, ...delta.topicMapping };
-            console.log('Updated topic mapping configuration');
-        }
-    }
-    
-    extractDeviceId(topic) {
-        // トピックからデバイスIDを抽出
-        const parts = topic.split('/');
-        return parts[2] || 'unknown';
-    }
-    
-    mapToCloudTopic(localTopic, deviceId) {
-        const mapping = this.bridgeConfig.topicMapping[localTopic.replace(/\/[^/]+\//, '/+/')];
-        return mapping ? mapping.replace('{deviceId}', deviceId) : null;
-    }
-}
+    async def shutdown(self):
+        """モジュールのシャットダウン"""
+        print('Shutting down MQTT Bridge Module...')
+        self.running = False
+        
+        if self.local_mqtt_client:
+            self.local_mqtt_client.loop_stop()
+            self.local_mqtt_client.disconnect()
+        
+        if self.module_client:
+            await self.module_client.disconnect()
+        
+        print('MQTT Bridge Module shut down')
 
-// モジュール起動
-async function main() {
-    const bridgeModule = new MQTTBridgeModule();
-    await bridgeModule.initialize();
+# メイン実行関数
+async def main():
+    bridge_module = MQTTBridgeModule()
     
-    console.log('MQTT Bridge Module started');
+    # シグナルハンドラーの設定
+    def signal_handler(signum, frame):
+        print(f'Signal {signum} received, shutting down gracefully')
+        asyncio.create_task(bridge_module.shutdown())
     
-    // プロセス終了時のクリーンアップ
-    process.on('SIGTERM', () => {
-        console.log('SIGTERM received, shutting down gracefully');
-        process.exit(0);
-    });
-}
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    try:
+        await bridge_module.initialize()
+        print('MQTT Bridge Module started')
+        
+        # メインループ
+        while bridge_module.running:
+            await asyncio.sleep(1)
+            
+    except Exception as e:
+        print(f'Module startup failed: {e}')
+        sys.exit(1)
+    finally:
+        await bridge_module.shutdown()
 
-main().catch(err => {
-    console.error('Module startup failed:', err);
-    process.exit(1);
-});
+if __name__ == '__main__':
+    asyncio.run(main())
 ```
 
 ## 8.3 Google Cloud IoT Platform
@@ -759,494 +953,886 @@ main().catch(err => {
 
 ### 8.3.1 Cloud Pub/Sub + Cloud Run アーキテクチャ
 
-```javascript
-// Cloud Run で動作するMQTTプロキシサービス
-const express = require('express');
-const { PubSub } = require('@google-cloud/pubsub');
-const mqtt = require('mqtt');
+```python
+# Cloud Run で動作するMQTTプロキシサービス
+from flask import Flask, request, jsonify
+from google.cloud import pubsub_v1
+from google.cloud import firestore
+import paho.mqtt.client as mqtt
+import json
+import os
+import threading
+import time
+from datetime import datetime
+from typing import Dict, Any
 
-class GoogleCloudMQTTProxy {
-    constructor() {
-        this.app = express();
-        this.pubsub = new PubSub();
-        this.mqttClient = null;
+class GoogleCloudMQTTProxy:
+    def __init__(self):
+        self.app = Flask(__name__)
+        self.publisher = pubsub_v1.PublisherClient()
+        self.firestore_client = firestore.Client()
+        self.mqtt_client = None
+        self.project_id = os.environ.get('PROJECT_ID')
         
-        this.setupExpress();
-        this.connectToMQTTBroker();
-    }
+        self.setup_flask_routes()
+        self.connect_to_mqtt_broker()
     
-    setupExpress() {
-        this.app.use(express.json());
+    def setup_flask_routes(self):
+        """Flask ルートの設定"""
         
-        // デバイス登録エンドポイント
-        this.app.post('/devices/:deviceId/register', async (req, res) => {
-            const deviceId = req.params.deviceId;
-            const config = req.body;
+        @self.app.route('/devices/<device_id>/register', methods=['POST'])
+        def register_device(device_id):
+            try:
+                config = request.get_json()
+                self.register_device(device_id, config)
+                return jsonify({'success': True, 'deviceId': device_id})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+        
+        @self.app.route('/devices/<device_id>/commands', methods=['POST'])
+        def send_command(device_id):
+            try:
+                command = request.get_json()
+                self.send_device_command(device_id, command)
+                return jsonify({'success': True})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+        
+        @self.app.route('/health', methods=['GET'])
+        def health_check():
+            return jsonify({
+                'status': 'healthy',
+                'timestamp': datetime.now().isoformat(),
+                'mqtt_connected': self.mqtt_client.is_connected() if self.mqtt_client else False
+            })
+        
+        @self.app.route('/devices', methods=['GET'])
+        def list_devices():
+            try:
+                devices_ref = self.firestore_client.collection('devices')
+                devices = []
+                for doc in devices_ref.stream():
+                    device_data = doc.to_dict()
+                    device_data['id'] = doc.id
+                    devices.append(device_data)
+                return jsonify({'devices': devices})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+    
+    def connect_to_mqtt_broker(self):
+        """MQTTブローカーへの接続"""
+        try:
+            # マネージドMQTTサービス（EMQX Cloud、HiveMQ Cloud等）への接続
+            broker_url = os.environ.get('MQTT_BROKER_URL', 'localhost')
+            username = os.environ.get('MQTT_USERNAME')
+            password = os.environ.get('MQTT_PASSWORD')
+            port = int(os.environ.get('MQTT_PORT', '1883'))
             
-            try {
-                await this.registerDevice(deviceId, config);
-                res.json({ success: true, deviceId });
-            } catch (error) {
-                res.status(500).json({ error: error.message });
+            client_id = f"gcp-proxy-{int(time.time())}"
+            self.mqtt_client = mqtt.Client(client_id=client_id)
+            
+            if username and password:
+                self.mqtt_client.username_pw_set(username, password)
+            
+            def on_connect(client, userdata, flags, rc):
+                if rc == 0:
+                    print('Connected to MQTT broker')
+                    self.setup_mqtt_subscriptions()
+                else:
+                    print(f'Failed to connect to MQTT broker: {rc}')
+            
+            def on_message(client, userdata, message):
+                self.handle_mqtt_message(message.topic, message.payload)
+            
+            def on_disconnect(client, userdata, rc):
+                print(f'Disconnected from MQTT broker: {rc}')
+            
+            self.mqtt_client.on_connect = on_connect
+            self.mqtt_client.on_message = on_message
+            self.mqtt_client.on_disconnect = on_disconnect
+            
+            self.mqtt_client.connect(broker_url, port, 60)
+            
+            # MQTTクライアントを別スレッドで実行
+            mqtt_thread = threading.Thread(target=self.mqtt_client.loop_forever, daemon=True)
+            mqtt_thread.start()
+            
+        except Exception as e:
+            print(f'Failed to connect to MQTT broker: {e}')
+    
+    def setup_mqtt_subscriptions(self):
+        """MQTT購読の設定"""
+        subscriptions = [
+            ('devices/+/telemetry', 1),
+            ('devices/+/state', 1), 
+            ('devices/+/events/+', 1)
+        ]
+        
+        for topic, qos in subscriptions:
+            result = self.mqtt_client.subscribe(topic, qos)
+            if result[0] == mqtt.MQTT_ERR_SUCCESS:
+                print(f'Subscribed to: {topic}')
+            else:
+                print(f'Failed to subscribe to: {topic}')
+    
+    def handle_mqtt_message(self, topic: str, message: bytes):
+        """MQTTメッセージの処理"""
+        try:
+            topic_parts = topic.split('/')
+            if len(topic_parts) < 3:
+                return
+            
+            device_id = topic_parts[1]
+            message_type = topic_parts[2]
+            
+            data = json.loads(message.decode())
+            
+            # Cloud Pub/Sub にメッセージ転送
+            pubsub_topic = f'projects/{self.project_id}/topics/iot-{message_type}'
+            
+            message_data = {
+                'deviceId': device_id,
+                'messageType': message_type,
+                'data': data,
+                'timestamp': datetime.now().isoformat(),
+                'originalTopic': topic
             }
-        });
-        
-        // デバイスコマンド送信エンドポイント
-        this.app.post('/devices/:deviceId/commands', async (req, res) => {
-            const deviceId = req.params.deviceId;
-            const command = req.body;
             
-            try {
-                await this.sendDeviceCommand(deviceId, command);
-                res.json({ success: true });
-            } catch (error) {
-                res.status(500).json({ error: error.message });
+            # Pub/Sub にパブリッシュ
+            topic_path = self.publisher.topic_path(self.project_id, f'iot-{message_type}')
+            message_json = json.dumps(message_data)
+            message_bytes = message_json.encode('utf-8')
+            
+            future = self.publisher.publish(topic_path, message_bytes)
+            future.result()  # 送信完了を待機
+            
+            print(f'Message forwarded to Pub/Sub: {topic}')
+            
+        except Exception as e:
+            print(f'Error handling MQTT message: {e}')
+    
+    def register_device(self, device_id: str, config: Dict[str, Any]):
+        """デバイス登録"""
+        try:
+            device_data = {
+                **config,
+                'registeredAt': datetime.now().isoformat(),
+                'status': 'registered',
+                'lastSeen': None
             }
-        });
-        
-        // ヘルスチェック
-        this.app.get('/health', (req, res) => {
-            res.json({ status: 'healthy', timestamp: new Date().toISOString() });
-        });
-    }
-    
-    async connectToMQTTBroker() {
-        // マネージドMQTTサービス（EMQX Cloud、HiveMQ Cloud等）への接続
-        this.mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
-            username: process.env.MQTT_USERNAME,
-            password: process.env.MQTT_PASSWORD,
-            clientId: `gcp-proxy-${Date.now()}`
-        });
-        
-        this.mqttClient.on('connect', () => {
-            console.log('Connected to MQTT broker');
-            this.setupMQTTSubscriptions();
-        });
-        
-        this.mqttClient.on('message', (topic, message) => {
-            this.handleMQTTMessage(topic, message);
-        });
-    }
-    
-    setupMQTTSubscriptions() {
-        // デバイステレメトリー受信
-        this.mqttClient.subscribe('devices/+/telemetry', { qos: 1 });
-        
-        // デバイス状態更新受信
-        this.mqttClient.subscribe('devices/+/state', { qos: 1 });
-        
-        // デバイスイベント受信
-        this.mqttClient.subscribe('devices/+/events/+', { qos: 1 });
-    }
-    
-    async handleMQTTMessage(topic, message) {
-        try {
-            const topicParts = topic.split('/');
-            const deviceId = topicParts[1];
-            const messageType = topicParts[2];
             
-            const data = JSON.parse(message.toString());
+            doc_ref = self.firestore_client.collection('devices').document(device_id)
+            doc_ref.set(device_data)
             
-            // Cloud Pub/Sub にメッセージ転送
-            const pubsubTopic = `projects/${process.env.PROJECT_ID}/topics/iot-${messageType}`;
+            print(f'Device registered: {device_id}')
             
-            await this.pubsub.topic(`iot-${messageType}`).publish(Buffer.from(JSON.stringify({
-                deviceId: deviceId,
-                messageType: messageType,
-                data: data,
-                timestamp: new Date().toISOString(),
-                originalTopic: topic
-            })));
-            
-            console.log(`Message forwarded to Pub/Sub: ${topic}`);
-            
-        } catch (error) {
-            console.error('Error handling MQTT message:', error);
-        }
-    }
+        except Exception as e:
+            print(f'Failed to register device {device_id}: {e}')
+            raise
     
-    async registerDevice(deviceId, config) {
-        // Firestore にデバイス情報保存
-        const { Firestore } = require('@google-cloud/firestore');
-        const firestore = new Firestore();
-        
-        await firestore.collection('devices').doc(deviceId).set({
-            ...config,
-            registeredAt: new Date().toISOString(),
-            status: 'registered'
-        });
-        
-        console.log(`Device registered: ${deviceId}`);
-    }
+    def send_device_command(self, device_id: str, command: Dict[str, Any]):
+        """デバイスコマンド送信"""
+        try:
+            topic = f'devices/{device_id}/commands'
+            command_json = json.dumps(command)
+            
+            result = self.mqtt_client.publish(topic, command_json, qos=1)
+            
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                print(f'Command sent to {device_id}: {command}')
+            else:
+                raise Exception(f'Failed to publish command: {result.rc}')
+            
+        except Exception as e:
+            print(f'Failed to send command to {device_id}: {e}')
+            raise
     
-    async sendDeviceCommand(deviceId, command) {
-        const topic = `devices/${deviceId}/commands`;
+    def start(self):
+        """サービス開始"""
+        port = int(os.environ.get('PORT', 8080))
         
-        this.mqttClient.publish(topic, JSON.stringify(command), { qos: 1 }, (err) => {
-            if (err) {
-                throw new Error(`Failed to send command: ${err.message}`);
-            }
-            console.log(`Command sent to ${deviceId}:`, command);
-        });
-    }
-    
-    start() {
-        const port = process.env.PORT || 8080;
-        this.app.listen(port, () => {
-            console.log(`MQTT Proxy started on port ${port}`);
-        });
-    }
-}
+        print(f'Starting MQTT Proxy on port {port}')
+        print(f'Project ID: {self.project_id}')
+        
+        self.app.run(
+            host='0.0.0.0',
+            port=port,
+            debug=os.environ.get('FLASK_ENV') == 'development'
+        )
 
-// サービス起動
-if (require.main === module) {
-    const proxy = new GoogleCloudMQTTProxy();
-    proxy.start();
-}
-
-module.exports = GoogleCloudMQTTProxy;
+# サービス起動
+if __name__ == '__main__':
+    proxy = GoogleCloudMQTTProxy()
+    proxy.start()
 ```
 
 ### 8.3.2 Cloud Functions でのメッセージ処理
 
-```javascript
-// Cloud Functions: Pub/Sub トリガー関数
-const { BigQuery } = require('@google-cloud/bigquery');
-const { Firestore } = require('@google-cloud/firestore');
+```python
+# Cloud Functions: Pub/Sub トリガー関数
+from google.cloud import bigquery
+from google.cloud import firestore
+from google.cloud import pubsub_v1
+import base64
+import json
+import functions_framework
+from datetime import datetime
+from typing import Dict, Any, List
 
-const bigquery = new BigQuery();
-const firestore = new Firestore();
+# クライアントの初期化
+bigquery_client = bigquery.Client()
+firestore_client = firestore.Client()
+publisher = pubsub_v1.PublisherClient()
 
-exports.processTelemetry = async (message, context) => {
-    try {
-        // Pub/Sub メッセージのデコード
-        const messageData = JSON.parse(Buffer.from(message.data, 'base64').toString());
+@functions_framework.cloud_event
+def process_telemetry(cloud_event):
+    """
+    Pub/Sub トリガー関数 - テレメトリデータ処理
+    """
+    try:
+        # Pub/Sub メッセージのデコード
+        message_data = base64.b64decode(cloud_event.data['message']['data']).decode()
+        telemetry_data = json.loads(message_data)
         
-        console.log('Processing telemetry:', messageData);
+        print(f'Processing telemetry: {telemetry_data}')
         
-        const { deviceId, data, timestamp } = messageData;
+        device_id = telemetry_data.get('deviceId')
+        data = telemetry_data.get('data', {})
+        timestamp = telemetry_data.get('timestamp')
         
-        // BigQuery にテレメトリーデータ保存
-        await saveTelemetryToBigQuery(deviceId, data, timestamp);
+        if not device_id or not data:
+            print('Invalid telemetry data: missing deviceId or data')
+            return
         
-        // 閾値チェックとアラート処理
-        await checkThresholdsAndAlert(deviceId, data);
+        # BigQuery にテレメトリーデータ保存
+        save_telemetry_to_bigquery(device_id, data, timestamp)
         
-        // デバイス状態の更新
-        await updateDeviceStatus(deviceId, timestamp);
+        # 閾値チェックとアラート処理
+        check_thresholds_and_alert(device_id, data)
         
-        console.log(`Telemetry processed for device: ${deviceId}`);
+        # デバイス状態の更新
+        update_device_status(device_id, timestamp)
         
-    } catch (error) {
-        console.error('Error processing telemetry:', error);
-        throw error;
-    }
-};
+        print(f'Telemetry processed for device: {device_id}')
+        
+    except Exception as error:
+        print(f'Error processing telemetry: {error}')
+        raise
 
-async function saveTelemetryToBigQuery(deviceId, data, timestamp) {
-    const dataset = bigquery.dataset('iot_data');
-    const table = dataset.table('telemetry');
-    
-    const row = {
-        device_id: deviceId,
-        timestamp: timestamp,
-        temperature: data.temperature || null,
-        humidity: data.humidity || null,
-        pressure: data.pressure || null,
-        raw_data: JSON.stringify(data)
-    };
-    
-    await table.insert([row]);
-}
-
-async function checkThresholdsAndAlert(deviceId, data) {
-    // デバイス設定の取得
-    const deviceDoc = await firestore.collection('devices').doc(deviceId).get();
-    const deviceConfig = deviceDoc.data();
-    
-    if (!deviceConfig || !deviceConfig.thresholds) {
-        return;
-    }
-    
-    // 閾値チェック
-    const alerts = [];
-    
-    if (data.temperature && deviceConfig.thresholds.temperature) {
-        if (data.temperature > deviceConfig.thresholds.temperature.max) {
-            alerts.push({
-                type: 'HIGH_TEMPERATURE',
-                value: data.temperature,
-                threshold: deviceConfig.thresholds.temperature.max
-            });
+def save_telemetry_to_bigquery(device_id: str, data: Dict[str, Any], timestamp: str):
+    """
+    テレメトリーデータをBigQueryに保存
+    """
+    try:
+        dataset_ref = bigquery_client.dataset('iot_data')
+        table_ref = dataset_ref.table('telemetry')
+        table = bigquery_client.get_table(table_ref)
+        
+        row = {
+            'device_id': device_id,
+            'timestamp': timestamp,
+            'temperature': data.get('temperature'),
+            'humidity': data.get('humidity'),
+            'pressure': data.get('pressure'),
+            'raw_data': json.dumps(data),
+            'processed_at': datetime.now().isoformat()
         }
-    }
-    
-    if (data.humidity && deviceConfig.thresholds.humidity) {
-        if (data.humidity > deviceConfig.thresholds.humidity.max) {
-            alerts.push({
-                type: 'HIGH_HUMIDITY',
-                value: data.humidity,
-                threshold: deviceConfig.thresholds.humidity.max
-            });
+        
+        # データが None の場合は除外
+        row = {k: v for k, v in row.items() if v is not None}
+        
+        errors = bigquery_client.insert_rows_json(table, [row])
+        
+        if errors:
+            print(f'BigQuery insert errors: {errors}')
+        else:
+            print(f'Telemetry data saved to BigQuery for device: {device_id}')
+            
+    except Exception as e:
+        print(f'Failed to save telemetry to BigQuery: {e}')
+        raise
+
+def check_thresholds_and_alert(device_id: str, data: Dict[str, Any]):
+    """
+    閾値チェックとアラート処理
+    """
+    try:
+        # デバイス設定の取得
+        device_ref = firestore_client.collection('devices').document(device_id)
+        device_doc = device_ref.get()
+        
+        if not device_doc.exists:
+            print(f'Device {device_id} not found in Firestore')
+            return
+        
+        device_config = device_doc.to_dict()
+        thresholds = device_config.get('thresholds', {})
+        
+        if not thresholds:
+            print(f'No thresholds configured for device {device_id}')
+            return
+        
+        # 閾値チェック
+        alerts = []
+        
+        # 温度チェック
+        temperature = data.get('temperature')
+        if temperature and 'temperature' in thresholds:
+            temp_threshold = thresholds['temperature']
+            if temperature > temp_threshold.get('max', float('inf')):
+                alerts.append({
+                    'type': 'HIGH_TEMPERATURE',
+                    'value': temperature,
+                    'threshold': temp_threshold['max'],
+                    'severity': 'critical'
+                })
+            elif temperature < temp_threshold.get('min', float('-inf')):
+                alerts.append({
+                    'type': 'LOW_TEMPERATURE',
+                    'value': temperature,
+                    'threshold': temp_threshold['min'],
+                    'severity': 'warning'
+                })
+        
+        # 湿度チェック
+        humidity = data.get('humidity')
+        if humidity and 'humidity' in thresholds:
+            humidity_threshold = thresholds['humidity']
+            if humidity > humidity_threshold.get('max', float('inf')):
+                alerts.append({
+                    'type': 'HIGH_HUMIDITY',
+                    'value': humidity,
+                    'threshold': humidity_threshold['max'],
+                    'severity': 'warning'
+                })
+        
+        # 圧力チェック
+        pressure = data.get('pressure')
+        if pressure and 'pressure' in thresholds:
+            pressure_threshold = thresholds['pressure']
+            if pressure > pressure_threshold.get('max', float('inf')):
+                alerts.append({
+                    'type': 'HIGH_PRESSURE',
+                    'value': pressure,
+                    'threshold': pressure_threshold['max'],
+                    'severity': 'critical'
+                })
+        
+        # アラート送信
+        for alert in alerts:
+            send_alert(device_id, alert)
+            
+    except Exception as e:
+        print(f'Error checking thresholds for device {device_id}: {e}')
+        raise
+
+def send_alert(device_id: str, alert: Dict[str, Any]):
+    """
+    アラートをPub/Sub経由で送信
+    """
+    try:
+        import os
+        project_id = os.environ.get('GCP_PROJECT')
+        topic_name = 'iot-alerts'
+        topic_path = publisher.topic_path(project_id, topic_name)
+        
+        alert_message = {
+            'deviceId': device_id,
+            'alertType': alert['type'],
+            'value': alert['value'],
+            'threshold': alert['threshold'],
+            'severity': alert.get('severity', 'warning'),
+            'timestamp': datetime.now().isoformat()
         }
-    }
-    
-    // アラート送信
-    for (const alert of alerts) {
-        await sendAlert(deviceId, alert);
-    }
-}
+        
+        message_json = json.dumps(alert_message)
+        message_bytes = message_json.encode('utf-8')
+        
+        future = publisher.publish(topic_path, message_bytes)
+        future.result()  # 送信完了を待機
+        
+        print(f'Alert sent for device {device_id}: {alert}')
+        
+        # Firestoreにもアラート履歴を保存
+        save_alert_to_firestore(device_id, alert_message)
+        
+    except Exception as e:
+        print(f'Failed to send alert for device {device_id}: {e}')
+        raise
 
-async function sendAlert(deviceId, alert) {
-    // Cloud Pub/Sub 経由でアラート送信
-    const { PubSub } = require('@google-cloud/pubsub');
-    const pubsub = new PubSub();
-    
-    const alertMessage = {
-        deviceId: deviceId,
-        alertType: alert.type,
-        value: alert.value,
-        threshold: alert.threshold,
-        timestamp: new Date().toISOString()
-    };
-    
-    await pubsub.topic('iot-alerts').publish(Buffer.from(JSON.stringify(alertMessage)));
-    
-    console.log(`Alert sent for device ${deviceId}:`, alert);
-}
+def save_alert_to_firestore(device_id: str, alert: Dict[str, Any]):
+    """
+    アラートをFirestoreに保存
+    """
+    try:
+        alerts_ref = firestore_client.collection('alerts')
+        alerts_ref.add({
+            **alert,
+            'acknowledged': False,
+            'created_at': firestore.SERVER_TIMESTAMP
+        })
+        
+        print(f'Alert saved to Firestore for device {device_id}')
+        
+    except Exception as e:
+        print(f'Failed to save alert to Firestore: {e}')
 
-async function updateDeviceStatus(deviceId, timestamp) {
-    await firestore.collection('devices').doc(deviceId).update({
-        lastSeen: timestamp,
-        status: 'online'
-    });
-}
+def update_device_status(device_id: str, timestamp: str):
+    """
+    デバイス状態の更新
+    """
+    try:
+        device_ref = firestore_client.collection('devices').document(device_id)
+        device_ref.update({
+            'lastSeen': timestamp,
+            'status': 'online',
+            'updated_at': firestore.SERVER_TIMESTAMP
+        })
+        
+        print(f'Device status updated for {device_id}')
+        
+    except Exception as e:
+        print(f'Failed to update device status for {device_id}: {e}')
+        
+# デバイス状態監視用Cloud Function
+@functions_framework.cloud_event
+def monitor_device_status(cloud_event):
+    """
+    定期実行でデバイスのオフライン検出
+    """
+    try:
+        from datetime import datetime, timedelta
+        
+        # 10分以上応答がないデバイスをオフラインと判定
+        offline_threshold = datetime.now() - timedelta(minutes=10)
+        
+        devices_ref = firestore_client.collection('devices')
+        query = devices_ref.where('status', '==', 'online')
+        
+        for device_doc in query.stream():
+            device_data = device_doc.to_dict()
+            last_seen_str = device_data.get('lastSeen')
+            
+            if last_seen_str:
+                last_seen = datetime.fromisoformat(last_seen_str.replace('Z', '+00:00'))
+                
+                if last_seen < offline_threshold:
+                    # デバイスをオフライン状態に更新
+                    device_doc.reference.update({
+                        'status': 'offline',
+                        'updated_at': firestore.SERVER_TIMESTAMP
+                    })
+                    
+                    # オフラインアラートを送信
+                    send_alert(device_doc.id, {
+                        'type': 'DEVICE_OFFLINE',
+                        'value': None,
+                        'threshold': None,
+                        'severity': 'warning'
+                    })
+                    
+                    print(f'Device {device_doc.id} marked as offline')
+        
+    except Exception as e:
+        print(f'Error monitoring device status: {e}')
+        raise
 ```
 
 ## 8.4 マルチクラウド戦略
 
 ### 8.4.1 クラウドアグノスティックMQTTクライアント
 
-```javascript
-class MultiCloudMQTTClient {
-    constructor(configs) {
-        this.configs = configs;
-        this.clients = new Map();
-        this.activeClient = null;
-        this.fallbackOrder = ['aws', 'azure', 'gcp'];
-    }
+```python
+import asyncio
+import json
+import time
+from datetime import datetime
+from typing import Dict, Any, Optional, List
+from abc import ABC, abstractmethod
+import random
+
+# AWS IoT用のインポート
+try:
+    from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
+except ImportError:
+    AWSIoTMQTTClient = None
+
+# Azure IoT用のインポート
+try:
+    from azure.iot.device import IoTHubDeviceClient, Message
+except ImportError:
+    IoTHubDeviceClient = None
+    Message = None
+
+# 標準MQTTクライアント
+import paho.mqtt.client as mqtt
+
+class CloudProvider(ABC):
+    """クラウドプロバイダーの抽象基底クラス"""
     
-    async initialize() {
-        // 各クラウドプロバイダーへの接続を初期化
-        for (const [provider, config] of Object.entries(this.configs)) {
-            try {
-                const client = await this.createClient(provider, config);
-                this.clients.set(provider, client);
-                console.log(`Initialized ${provider} client`);
-            } catch (error) {
-                console.error(`Failed to initialize ${provider} client:`, error);
-            }
-        }
+    @abstractmethod
+    async def connect(self) -> bool:
+        pass
+    
+    @abstractmethod
+    async def disconnect(self):
+        pass
+    
+    @abstractmethod
+    async def publish_telemetry(self, data: Dict[str, Any]) -> bool:
+        pass
+    
+    @abstractmethod
+    def is_connected(self) -> bool:
+        pass
+
+class AWSProvider(CloudProvider):
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.client: Optional[AWSIoTMQTTClient] = None
+        self.connected = False
         
-        // プライマリクライアントの選択
-        await this.selectActiveClient();
-    }
+        if AWSIoTMQTTClient is None:
+            raise ImportError("AWSIoTPythonSDK not available")
     
-    async createClient(provider, config) {
-        switch (provider) {
-            case 'aws':
-                return await this.createAWSClient(config);
-            case 'azure':
-                return await this.createAzureClient(config);
-            case 'gcp':
-                return await this.createGCPClient(config);
-            default:
-                throw new Error(`Unknown provider: ${provider}`);
-        }
-    }
-    
-    async createAWSClient(config) {
-        const awsIot = require('aws-iot-device-sdk-v2');
-        // AWS IoT Core接続実装
-        // (前述のAWS実装を参照)
-    }
-    
-    async createAzureClient(config) {
-        const { Client } = require('azure-iot-device');
-        // Azure IoT Hub接続実装
-        // (前述のAzure実装を参照)
-    }
-    
-    async createGCPClient(config) {
-        // GCP MQTT proxy実装
-        const mqtt = require('mqtt');
-        return mqtt.connect(config.brokerUrl, config.options);
-    }
-    
-    async selectActiveClient() {
-        for (const provider of this.fallbackOrder) {
-            const client = this.clients.get(provider);
-            if (client && await this.testConnection(client, provider)) {
-                this.activeClient = { provider, client };
-                console.log(`Active client set to: ${provider}`);
-                break;
-            }
-        }
-        
-        if (!this.activeClient) {
-            throw new Error('No cloud provider available');
-        }
-    }
-    
-    async testConnection(client, provider) {
-        try {
-            // 各プロバイダー固有の接続テスト
-            switch (provider) {
-                case 'aws':
-                    return client.connection && client.connection.isConnected;
-                case 'azure':
-                    return client.isConnected();
-                case 'gcp':
-                    return client.connected;
-                default:
-                    return false;
-            }
-        } catch (error) {
-            return false;
-        }
-    }
-    
-    async publishTelemetry(data) {
-        if (!this.activeClient) {
-            throw new Error('No active client available');
-        }
-        
-        try {
-            await this.publishToProvider(this.activeClient.provider, this.activeClient.client, data);
-        } catch (error) {
-            console.error(`Failed to publish to ${this.activeClient.provider}:`, error);
+    async def connect(self) -> bool:
+        try:
+            self.client = AWSIoTMQTTClient(self.config['thingName'])
+            self.client.configureEndpoint(self.config['endpoint'], 8883)
+            self.client.configureCredentials(
+                './AmazonRootCA1.pem',
+                self.config['keyPath'],
+                self.config['certPath']
+            )
             
-            // フェイルオーバー実行
-            await this.executeFailover();
+            result = self.client.connect()
+            self.connected = result
+            return result
+        except Exception as e:
+            print(f"AWS connection failed: {e}")
+            return False
+    
+    async def disconnect(self):
+        if self.client and self.connected:
+            self.client.disconnect()
+            self.connected = False
+    
+    async def publish_telemetry(self, data: Dict[str, Any]) -> bool:
+        if not self.connected or not self.client:
+            return False
+        
+        try:
+            message = {
+                **data,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'multi-cloud-client'
+            }
             
-            // リトライ
-            if (this.activeClient) {
-                await this.publishToProvider(this.activeClient.provider, this.activeClient.client, data);
+            result = self.client.publish('telemetry/data', json.dumps(message), 1)
+            return result
+        except Exception as e:
+            print(f"AWS publish failed: {e}")
+            return False
+    
+    def is_connected(self) -> bool:
+        return self.connected
+
+class AzureProvider(CloudProvider):
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.client: Optional[IoTHubDeviceClient] = None
+        self.connected = False
+        
+        if IoTHubDeviceClient is None:
+            raise ImportError("azure-iot-device not available")
+    
+    async def connect(self) -> bool:
+        try:
+            self.client = IoTHubDeviceClient.create_from_connection_string(
+                self.config['connectionString']
+            )
+            await self.client.connect()
+            self.connected = True
+            return True
+        except Exception as e:
+            print(f"Azure connection failed: {e}")
+            return False
+    
+    async def disconnect(self):
+        if self.client and self.connected:
+            await self.client.disconnect()
+            self.connected = False
+    
+    async def publish_telemetry(self, data: Dict[str, Any]) -> bool:
+        if not self.connected or not self.client:
+            return False
+        
+        try:
+            message_data = {
+                **data,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'multi-cloud-client'
+            }
+            
+            message = Message(json.dumps(message_data))
+            message.custom_properties['deviceType'] = 'multi-cloud-sensor'
+            
+            await self.client.send_message(message)
+            return True
+        except Exception as e:
+            print(f"Azure publish failed: {e}")
+            return False
+    
+    def is_connected(self) -> bool:
+        return self.connected
+
+class GCPProvider(CloudProvider):
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.client: Optional[mqtt.Client] = None
+        self.connected = False
+    
+    async def connect(self) -> bool:
+        try:
+            self.client = mqtt.Client(client_id=f"gcp-client-{int(time.time())}")
+            
+            options = self.config.get('options', {})
+            if 'username' in options and 'password' in options:
+                self.client.username_pw_set(options['username'], options['password'])
+            
+            def on_connect(client, userdata, flags, rc):
+                self.connected = (rc == 0)
+            
+            self.client.on_connect = on_connect
+            
+            broker_url = self.config['brokerUrl'].replace('mqtts://', '').replace('mqtt://', '')
+            port = 8883 if self.config['brokerUrl'].startswith('mqtts://') else 1883
+            
+            self.client.connect(broker_url, port, 60)
+            self.client.loop_start()
+            
+            # 接続完了を待機
+            for _ in range(50):  # 5秒待機
+                if self.connected:
+                    return True
+                await asyncio.sleep(0.1)
+            
+            return False
+        except Exception as e:
+            print(f"GCP connection failed: {e}")
+            return False
+    
+    async def disconnect(self):
+        if self.client and self.connected:
+            self.client.loop_stop()
+            self.client.disconnect()
+            self.connected = False
+    
+    async def publish_telemetry(self, data: Dict[str, Any]) -> bool:
+        if not self.connected or not self.client:
+            return False
+        
+        try:
+            message = {
+                **data,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'multi-cloud-client'
+            }
+            
+            result = self.client.publish('devices/telemetry', json.dumps(message), qos=1)
+            return result.rc == mqtt.MQTT_ERR_SUCCESS
+        except Exception as e:
+            print(f"GCP publish failed: {e}")
+            return False
+    
+    def is_connected(self) -> bool:
+        return self.connected
+
+class MultiCloudMQTTClient:
+    def __init__(self, configs: Dict[str, Dict[str, Any]]):
+        self.configs = configs
+        self.clients: Dict[str, CloudProvider] = {}
+        self.active_client: Optional[Dict[str, Any]] = None
+        self.fallback_order = ['aws', 'azure', 'gcp']
+    
+    async def initialize(self):
+        """各クラウドプロバイダーへの接続を初期化"""
+        for provider, config in self.configs.items():
+            try:
+                client = await self.create_client(provider, config)
+                self.clients[provider] = client
+                print(f"Initialized {provider} client")
+            except Exception as error:
+                print(f"Failed to initialize {provider} client: {error}")
+        
+        # プライマリクライアントの選択
+        await self.select_active_client()
+    
+    async def create_client(self, provider: str, config: Dict[str, Any]) -> CloudProvider:
+        """プロバイダー固有のクライアントを作成"""
+        if provider == 'aws':
+            return AWSProvider(config)
+        elif provider == 'azure':
+            return AzureProvider(config)
+        elif provider == 'gcp':
+            return GCPProvider(config)
+        else:
+            raise ValueError(f"Unknown provider: {provider}")
+    
+    async def select_active_client(self):
+        """アクティブクライアントの選択"""
+        for provider in self.fallback_order:
+            if provider in self.clients:
+                client = self.clients[provider]
+                if await self.test_connection(client, provider):
+                    self.active_client = {'provider': provider, 'client': client}
+                    print(f"Active client set to: {provider}")
+                    return
+        
+        if not self.active_client:
+            raise Exception('No cloud provider available')
+    
+    async def test_connection(self, client: CloudProvider, provider: str) -> bool:
+        """接続テスト"""
+        try:
+            if not client.is_connected():
+                return await client.connect()
+            return True
+        except Exception:
+            return False
+    
+    async def publish_telemetry(self, data: Dict[str, Any]):
+        """テレメトリデータの送信"""
+        if not self.active_client:
+            raise Exception('No active client available')
+        
+        try:
+            success = await self.active_client['client'].publish_telemetry(data)
+            if success:
+                print(f"Published to {self.active_client['provider']}: {data}")
+            else:
+                raise Exception("Publish failed")
+        except Exception as error:
+            print(f"Failed to publish to {self.active_client['provider']}: {error}")
+            
+            # フェイルオーバー実行
+            await self.execute_failover()
+            
+            # リトライ
+            if self.active_client:
+                success = await self.active_client['client'].publish_telemetry(data)
+                if success:
+                    print(f"Retry successful to {self.active_client['provider']}: {data}")
+                else:
+                    raise Exception("Retry failed")
+    
+    async def execute_failover(self):
+        """フェイルオーバーの実行"""
+        print('Executing failover...')
+        
+        current_index = self.fallback_order.index(self.active_client['provider'])
+        next_providers = self.fallback_order[current_index + 1:]
+        
+        for provider in next_providers:
+            if provider in self.clients:
+                client = self.clients[provider]
+                if await self.test_connection(client, provider):
+                    self.active_client = {'provider': provider, 'client': client}
+                    print(f"Failover completed to: {provider}")
+                    return
+        
+        # 全てのプロバイダーが利用不可
+        self.active_client = None
+        raise Exception('All cloud providers are unavailable')
+    
+    def get_current_provider(self) -> Optional[str]:
+        """現在のプロバイダーを取得"""
+        return self.active_client['provider'] if self.active_client else None
+    
+    async def get_status(self) -> Dict[str, Any]:
+        """接続状態の取得"""
+        status = {
+            'activeProvider': self.get_current_provider(),
+            'availableProviders': []
+        }
+        
+        for provider, client in self.clients.items():
+            is_connected = await self.test_connection(client, provider)
+            status['availableProviders'].append({
+                'provider': provider,
+                'connected': is_connected
+            })
+        
+        return status
+    
+    async def shutdown(self):
+        """全クライアントの切断"""
+        for client in self.clients.values():
+            await client.disconnect()
+        print("All clients disconnected")
+
+# 使用例
+async def main():
+    multi_cloud_configs = {
+        'aws': {
+            'endpoint': 'your-endpoint.iot.us-east-1.amazonaws.com',
+            'certPath': './aws-cert.pem',
+            'keyPath': './aws-key.pem',
+            'thingName': 'multi-cloud-device'
+        },
+        'azure': {
+            'connectionString': 'HostName=your-hub.azure-devices.net;DeviceId=multi-cloud-device;SharedAccessKey=your-key'
+        },
+        'gcp': {
+            'brokerUrl': 'mqtts://your-mqtt-proxy.run.app',
+            'options': {
+                'username': 'gcp-device',
+                'password': 'device-token'
             }
         }
     }
     
-    async publishToProvider(provider, client, data) {
-        const message = {
-            ...data,
-            timestamp: new Date().toISOString(),
-            source: 'multi-cloud-client'
-        };
-        
-        switch (provider) {
-            case 'aws':
-                await client.publish('telemetry/data', JSON.stringify(message), { qos: 1 });
-                break;
-            case 'azure':
-                await client.sendEvent(new Message(JSON.stringify(message)));
-                break;
-            case 'gcp':
-                client.publish('devices/telemetry', JSON.stringify(message), { qos: 1 });
-                break;
-        }
-        
-        console.log(`Published to ${provider}:`, data);
-    }
+    multi_cloud_client = MultiCloudMQTTClient(multi_cloud_configs)
     
-    async executeFailover() {
-        console.log('Executing failover...');
+    try:
+        await multi_cloud_client.initialize()
         
-        const currentIndex = this.fallbackOrder.indexOf(this.activeClient.provider);
-        const nextProviders = this.fallbackOrder.slice(currentIndex + 1);
+        # テレメトリ送信タスク
+        async def telemetry_loop():
+            while True:
+                telemetry_data = {
+                    'temperature': 20 + random.random() * 15,
+                    'humidity': 40 + random.random() * 30,
+                    'deviceId': 'multi-cloud-sensor-001'
+                }
+                
+                try:
+                    await multi_cloud_client.publish_telemetry(telemetry_data)
+                except Exception as error:
+                    print(f'Failed to publish telemetry: {error}')
+                
+                await asyncio.sleep(30)
         
-        for (const provider of nextProviders) {
-            const client = this.clients.get(provider);
-            if (client && await this.testConnection(client, provider)) {
-                this.activeClient = { provider, client };
-                console.log(`Failover completed to: ${provider}`);
-                return;
-            }
-        }
+        # ステータス監視タスク
+        async def status_loop():
+            while True:
+                status = await multi_cloud_client.get_status()
+                print(f'Multi-cloud status: {status}')
+                await asyncio.sleep(60)
         
-        // 全てのプロバイダーが利用不可
-        this.activeClient = null;
-        throw new Error('All cloud providers are unavailable');
-    }
-    
-    getCurrentProvider() {
-        return this.activeClient ? this.activeClient.provider : null;
-    }
-    
-    async getStatus() {
-        const status = {
-            activeProvider: this.getCurrentProvider(),
-            availableProviders: []
-        };
+        # タスクを並行実行
+        await asyncio.gather(
+            telemetry_loop(),
+            status_loop()
+        )
         
-        for (const [provider, client] of this.clients.entries()) {
-            const isConnected = await this.testConnection(client, provider);
-            status.availableProviders.push({
-                provider,
-                connected: isConnected
-            });
-        }
-        
-        return status;
-    }
-}
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+    finally:
+        await multi_cloud_client.shutdown()
 
-// 使用例
-const multiCloudConfigs = {
-    aws: {
-        endpoint: 'your-endpoint.iot.us-east-1.amazonaws.com',
-        certPath: './aws-cert.pem',
-        keyPath: './aws-key.pem',
-        thingName: 'multi-cloud-device'
-    },
-    azure: {
-        connectionString: 'HostName=your-hub.azure-devices.net;DeviceId=multi-cloud-device;SharedAccessKey=your-key'
-    },
-    gcp: {
-        brokerUrl: 'mqtts://your-mqtt-proxy.run.app',
-        options: {
-            username: 'gcp-device',
-            password: 'device-token'
-        }
-    }
-};
-
-async function main() {
-    const multiCloudClient = new MultiCloudMQTTClient(multiCloudConfigs);
-    await multiCloudClient.initialize();
-    
-    // 定期的なテレメトリ送信
-    setInterval(async () => {
-        const telemetryData = {
-            temperature: 20 + Math.random() * 15,
-            humidity: 40 + Math.random() * 30,
-            deviceId: 'multi-cloud-sensor-001'
-        };
-        
-        try {
-            await multiCloudClient.publishTelemetry(telemetryData);
-        } catch (error) {
-            console.error('Failed to publish telemetry:', error);
-        }
-    }, 30000);
-    
-    // ステータス監視
-    setInterval(async () => {
-        const status = await multiCloudClient.getStatus();
-        console.log('Multi-cloud status:', status);
-    }, 60000);
-}
-
-main().catch(console.error);
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 ## 参考リンク

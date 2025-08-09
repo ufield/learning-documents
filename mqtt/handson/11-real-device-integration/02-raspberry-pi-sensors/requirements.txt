@@ -1,0 +1,52 @@
+# Core MQTT and IoT
+paho-mqtt>=1.6.1
+PyYAML>=6.0
+
+# Raspberry Pi GPIO and Hardware
+RPi.GPIO>=0.7.1
+gpiozero>=1.6.2
+
+# Sensor Libraries
+Adafruit-DHT>=1.4.0
+adafruit-circuitpython-bmp280>=3.2.0
+adafruit-circuitpython-bh1750>=1.1.0
+w1thermsensor>=2.0.0
+
+# CircuitPython Compatibility
+adafruit-blinka>=8.22.0
+adafruit-circuitpython-busdevice>=5.2.0
+
+# System Monitoring
+psutil>=5.9.0
+
+# Async Programming
+asyncio-mqtt>=0.16.1
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Web Interface (Optional)
+flask>=2.3.0
+flask-cors>=4.0.0
+flask-socketio>=5.3.0
+
+# Database (Optional)
+influxdb-client>=1.37.0
+sqlite3  # Built-in
+
+# Configuration and Environment
+python-dotenv>=1.0.0
+
+# Logging and Debugging
+coloredlogs>=15.0
+
+# Development and Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-mock>=3.11.0
+
+# Hardware Testing Tools
+i2c-tools  # System package: sudo apt install i2c-tools
+# Note: Some libraries may require system packages:
+# sudo apt install python3-pip python3-dev python3-smbus i2c-tools

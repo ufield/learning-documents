@@ -431,270 +431,428 @@ if __name__ == "__main__":
 
 ### 10.3.1 構造化ログ実装
 
-```javascript
-const winston = require('winston');
-const mqtt = require('mqtt');
+```python
+import logging
+import json
+import re
+import sys
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
+import paho.mqtt.client as mqtt
 
-class StructuredMQTTLogger {
-    constructor(options = {}) {
-        this.setupLogger(options);
-        this.correlationId = null;
-        this.sessionId = null;
-    }
+class StructuredMQTTLogger:
+    def __init__(self, options=None):
+        if options is None:
+            options = {}
+        
+        self.correlation_id = None
+        self.session_id = None
+        self.setup_logger(options)
     
-    setupLogger(options) {
-        const logFormat = winston.format.combine(
-            winston.format.timestamp(),
-            winston.format.errors({ stack: true }),
-            winston.format.json(),
-            winston.format.printf(({ timestamp, level, message, ...meta }) => {
-                const logEntry = {
-                    '@timestamp': timestamp,
-                    level: level,
-                    message: message,
-                    service: 'mqtt-client',
-                    version: '1.0.0',
-                    ...meta
-                };
-                
-                if (this.correlationId) {
-                    logEntry.correlationId = this.correlationId;
+    def setup_logger(self, options):
+        # カスタムフォーマッター
+        class CustomFormatter(logging.Formatter):
+            def __init__(self, mqtt_logger):
+                super().__init__()
+                self.mqtt_logger = mqtt_logger
+            
+            def format(self, record):
+                log_entry = {
+                    '@timestamp': datetime.fromtimestamp(record.created).isoformat(),
+                    'level': record.levelname.lower(),
+                    'message': record.getMessage(),
+                    'service': 'mqtt-client',
+                    'version': '1.0.0'
                 }
                 
-                if (this.sessionId) {
-                    logEntry.sessionId = this.sessionId;
-                }
+                # メタデータの追加
+                if hasattr(record, '__dict__'):
+                    for key, value in record.__dict__.items():
+                        if key not in ['name', 'msg', 'args', 'levelname', 'levelno', 
+                                     'pathname', 'filename', 'module', 'lineno', 
+                                     'funcName', 'created', 'msecs', 'relativeCreated', 
+                                     'thread', 'threadName', 'processName', 'process',
+                                     'getMessage', 'exc_info', 'exc_text', 'stack_info']:
+                            log_entry[key] = value
                 
-                return JSON.stringify(logEntry);
-            })
-        );
+                # 関連ID追加
+                if self.mqtt_logger.correlation_id:
+                    log_entry['correlationId'] = self.mqtt_logger.correlation_id
+                
+                if self.mqtt_logger.session_id:
+                    log_entry['sessionId'] = self.mqtt_logger.session_id
+                
+                return json.dumps(log_entry)
         
-        this.logger = winston.createLogger({
-            level: options.level || 'info',
-            format: logFormat,
-            transports: [
-                new winston.transports.Console(),
-                new winston.transports.File({ 
-                    filename: options.logFile || 'mqtt-client.log',
-                    maxsize: 10 * 1024 * 1024, // 10MB
-                    maxFiles: 5,
-                    tailable: true
-                })
-            ]
-        });
-    }
-    
-    setCorrelationId(id) {
-        this.correlationId = id;
-    }
-    
-    setSessionId(id) {
-        this.sessionId = id;
-    }
-    
-    logConnection(event, details = {}) {
-        this.logger.info('MQTT connection event', {
-            event: event,
-            category: 'connection',
-            details: details,
-            timestamp: new Date().toISOString()
-        });
-    }
-    
-    logMessage(direction, topic, payload, options = {}) {
-        const messageInfo = {
-            event: `message_${direction}`,
-            category: 'message',
-            topic: topic,
-            payloadSize: Buffer.isBuffer(payload) ? payload.length : Buffer.byteLength(payload.toString()),
-            qos: options.qos || 0,
-            retain: options.retain || false,
-            timestamp: new Date().toISOString()
-        };
+        # ロガー設定
+        self.logger = logging.getLogger('mqtt_client')
+        self.logger.setLevel(getattr(logging, options.get('level', 'INFO').upper()))
         
-        // センシティブデータのマスキング
-        if (this.isSensitiveTopic(topic)) {
-            messageInfo.payloadPreview = '[SENSITIVE]';
-        } else {
-            messageInfo.payloadPreview = this.truncatePayload(payload);
+        # ハンドラーをクリア
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
+        
+        # コンソールハンドラー
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(CustomFormatter(self))
+        self.logger.addHandler(console_handler)
+        
+        # ファイルハンドラー
+        log_file = options.get('log_file', 'mqtt-client.log')
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=10 * 1024 * 1024,  # 10MB
+            backupCount=5
+        )
+        file_handler.setFormatter(CustomFormatter(self))
+        self.logger.addHandler(file_handler)
+    
+    def set_correlation_id(self, correlation_id):
+        self.correlation_id = correlation_id
+    
+    def set_session_id(self, session_id):
+        self.session_id = session_id
+    
+    def log_connection(self, event, details=None):
+        if details is None:
+            details = {}
+        
+        self.logger.info('MQTT connection event', extra={
+            'event': event,
+            'category': 'connection',
+            'details': details,
+            'timestamp': datetime.now().isoformat()
+        })
+    
+    def log_message(self, direction, topic, payload, options=None):
+        if options is None:
+            options = {}
+        
+        # ペイロードサイズ計算
+        if isinstance(payload, bytes):
+            payload_size = len(payload)
+        else:
+            payload_size = len(str(payload).encode('utf-8'))
+        
+        message_info = {
+            'event': f'message_{direction}',
+            'category': 'message',
+            'topic': topic,
+            'payloadSize': payload_size,
+            'qos': options.get('qos', 0),
+            'retain': options.get('retain', False),
+            'timestamp': datetime.now().isoformat()
         }
         
-        this.logger.info(`Message ${direction}`, messageInfo);
-    }
+        # センシティブデータのマスキング
+        if self.is_sensitive_topic(topic):
+            message_info['payloadPreview'] = '[SENSITIVE]'
+        else:
+            message_info['payloadPreview'] = self.truncate_payload(payload)
+        
+        self.logger.info(f'Message {direction}', extra=message_info)
     
-    logError(error, context = {}) {
-        this.logger.error('MQTT error occurred', {
-            event: 'error',
-            category: 'error',
-            error: {
-                message: error.message,
-                stack: error.stack,
-                code: error.code
+    def log_error(self, error, context=None):
+        if context is None:
+            context = {}
+        
+        error_info = {
+            'event': 'error',
+            'category': 'error',
+            'error': {
+                'message': str(error),
+                'type': type(error).__name__
             },
-            context: context,
-            timestamp: new Date().toISOString()
-        });
-    }
-    
-    logPerformance(operation, duration, details = {}) {
-        this.logger.info('Performance metric', {
-            event: 'performance',
-            category: 'performance',
-            operation: operation,
-            durationMs: duration,
-            details: details,
-            timestamp: new Date().toISOString()
-        });
-    }
-    
-    logSecurity(event, details = {}) {
-        this.logger.warn('Security event', {
-            event: event,
-            category: 'security',
-            details: details,
-            timestamp: new Date().toISOString()
-        });
-    }
-    
-    isSensitiveTopic(topic) {
-        const sensitivePatterns = [
-            /\/password$/,
-            /\/secret$/,
-            /\/key$/,
-            /\/token$/,
-            /\/credential$/
-        ];
-        
-        return sensitivePatterns.some(pattern => pattern.test(topic));
-    }
-    
-    truncatePayload(payload, maxLength = 200) {
-        const payloadStr = payload.toString();
-        if (payloadStr.length <= maxLength) {
-            return payloadStr;
+            'context': context,
+            'timestamp': datetime.now().isoformat()
         }
-        return payloadStr.substring(0, maxLength) + '...';
-    }
-}
+        
+        # スタックトレース情報があれば追加
+        import traceback
+        if hasattr(error, '__traceback__') and error.__traceback__:
+            error_info['error']['stack'] = ''.join(traceback.format_tb(error.__traceback__))
+        
+        self.logger.error('MQTT error occurred', extra=error_info)
+    
+    def log_performance(self, operation, duration, details=None):
+        if details is None:
+            details = {}
+        
+        self.logger.info('Performance metric', extra={
+            'event': 'performance',
+            'category': 'performance',
+            'operation': operation,
+            'durationMs': duration * 1000 if duration < 1 else duration,  # ミリ秒に変換
+            'details': details,
+            'timestamp': datetime.now().isoformat()
+        })
+    
+    def log_security(self, event, details=None):
+        if details is None:
+            details = {}
+        
+        self.logger.warning('Security event', extra={
+            'event': event,
+            'category': 'security',
+            'details': details,
+            'timestamp': datetime.now().isoformat()
+        })
+    
+    def is_sensitive_topic(self, topic):
+        sensitive_patterns = [
+            r'/password$',
+            r'/secret$',
+            r'/key$',
+            r'/token$',
+            r'/credential$'
+        ]
+        
+        return any(re.search(pattern, topic) for pattern in sensitive_patterns)
+    
+    def truncate_payload(self, payload, max_length=200):
+        payload_str = str(payload)
+        if len(payload_str) <= max_length:
+            return payload_str
+        return payload_str[:max_length] + '...'
 
-// 使用例：ログ付きMQTTクライアント
-class LoggedMQTTClient {
-    constructor(brokerUrl, options = {}) {
-        this.brokerUrl = brokerUrl;
-        this.options = options;
-        this.logger = new StructuredMQTTLogger(options.logging || {});
-        this.client = null;
-        this.connectionStartTime = null;
-    }
+# 使用例：ログ付きMQTTクライアント
+class LoggedMQTTClient:
+    def __init__(self, broker_url, options=None):
+        if options is None:
+            options = {}
+        
+        self.broker_url = broker_url
+        self.options = options
+        self.logger = StructuredMQTTLogger(options.get('logging', {}))
+        self.client = None
+        self.connection_start_time = None
     
-    async connect() {
-        this.connectionStartTime = Date.now();
-        this.logger.setSessionId(`session_${Date.now()}`);
+    async def connect(self):
+        import random
+        import string
         
-        return new Promise((resolve, reject) => {
-            this.client = mqtt.connect(this.brokerUrl, this.options);
-            
-            this.client.on('connect', (connack) => {
-                const connectionDuration = Date.now() - this.connectionStartTime;
+        self.connection_start_time = time.time()
+        session_id = f"session_{int(time.time() * 1000)}"
+        self.logger.set_session_id(session_id)
+        
+        # 接続完了を待つためのイベント
+        import asyncio
+        connection_event = asyncio.Event()
+        connection_result = {'success': False, 'error': None}
+        
+        def on_connect(client, userdata, flags, rc):
+            nonlocal connection_result
+            if rc == 0:
+                connection_duration = (time.time() - self.connection_start_time) * 1000
                 
-                this.logger.logConnection('connected', {
-                    broker: this.brokerUrl,
-                    clientId: this.options.clientId,
-                    cleanSession: this.options.clean,
-                    connectionDuration: connectionDuration,
-                    sessionPresent: connack.sessionPresent
-                });
+                self.logger.log_connection('connected', {
+                    'broker': self.broker_url,
+                    'clientId': self.options.get('client_id'),
+                    'cleanSession': self.options.get('clean_session', True),
+                    'connectionDuration': connection_duration,
+                    'sessionPresent': flags.get('session_present', False)
+                })
                 
-                this.logger.logPerformance('connection_establish', connectionDuration);
-                resolve();
-            });
+                self.logger.log_performance('connection_establish', connection_duration)
+                connection_result['success'] = True
+            else:
+                error_msg = f"Connection failed with code {rc}"
+                connection_result['error'] = Exception(error_msg)
             
-            this.client.on('error', (error) => {
-                this.logger.logError(error, {
-                    operation: 'connection',
-                    broker: this.brokerUrl
-                });
-                reject(error);
-            });
+            connection_event.set()
+        
+        def on_disconnect(client, userdata, rc):
+            self.logger.log_connection('disconnected')
+        
+        def on_message(client, userdata, msg):
+            self.logger.log_message('received', msg.topic, msg.payload, {
+                'qos': msg.qos,
+                'retain': msg.retain
+            })
+        
+        def on_error(client, userdata, error):
+            self.logger.log_error(error, {
+                'operation': 'connection',
+                'broker': self.broker_url
+            })
             
-            this.client.on('close', () => {
-                this.logger.logConnection('disconnected');
-            });
+            # セキュリティイベントの監視
+            error_str = str(error)
+            if 'ENOTFOUND' in error_str or 'ECONNREFUSED' in error_str:
+                self.logger.log_security('connection_blocked', {
+                    'broker': self.broker_url,
+                    'errorCode': error_str
+                })
+        
+        # MQTTクライアント作成
+        client_id = self.options.get('client_id', f"logged_client_{int(time.time())}")
+        self.client = mqtt.Client(client_id=client_id)
+        
+        # コールバック設定
+        self.client.on_connect = on_connect
+        self.client.on_disconnect = on_disconnect
+        self.client.on_message = on_message
+        
+        # 接続実行
+        try:
+            # broker_url からホストとポートを解析
+            if '://' in self.broker_url:
+                # mqtt://host:port 形式
+                url_parts = self.broker_url.split('://', 1)[1]
+            else:
+                url_parts = self.broker_url
             
-            this.client.on('message', (topic, message, packet) => {
-                this.logger.logMessage('received', topic, message, {
-                    qos: packet.qos,
-                    retain: packet.retain,
-                    dup: packet.dup
-                });
-            });
+            if ':' in url_parts:
+                host, port_str = url_parts.split(':', 1)
+                port = int(port_str)
+            else:
+                host = url_parts
+                port = 1883
             
-            // セキュリティイベントの監視
-            this.client.on('error', (error) => {
-                if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
-                    this.logger.logSecurity('connection_blocked', {
-                        broker: this.brokerUrl,
-                        errorCode: error.code
-                    });
-                }
-            });
-        });
-    }
+            self.client.connect(host, port, 60)
+            self.client.loop_start()
+            
+            # 接続完了を待機
+            await asyncio.wait_for(connection_event.wait(), timeout=30)
+            
+            if not connection_result['success']:
+                error = connection_result.get('error', Exception("Connection failed"))
+                raise error
+                
+        except Exception as error:
+            self.logger.log_error(error, {
+                'operation': 'connection',
+                'broker': self.broker_url
+            })
+            raise
     
-    async publish(topic, message, options = {}) {
-        const correlationId = `pub_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-        this.logger.setCorrelationId(correlationId);
+    async def publish(self, topic, message, options=None):
+        if options is None:
+            options = {}
         
-        const publishStartTime = Date.now();
+        import random
+        import string
         
-        return new Promise((resolve, reject) => {
-            this.client.publish(topic, message, options, (error, packet) => {
-                const publishDuration = Date.now() - publishStartTime;
+        correlation_id = f"pub_{int(time.time() * 1000)}_{''.join(random.choices(string.ascii_letters + string.digits, k=6))}"
+        self.logger.set_correlation_id(correlation_id)
+        
+        publish_start_time = time.time()
+        
+        # 発行完了を待つためのイベント
+        publish_event = asyncio.Event()
+        publish_result = {'success': False, 'error': None, 'packet': None}
+        
+        def on_publish(client, userdata, mid):
+            nonlocal publish_result
+            publish_duration = (time.time() - publish_start_time) * 1000
+            
+            publish_result['success'] = True
+            publish_result['packet'] = mid
+            
+            self.logger.log_message('sent', topic, message, options)
+            self.logger.log_performance('message_publish', publish_duration, {
+                'topic': topic,
+                'qos': options.get('qos', 0)
+            })
+            
+            publish_event.set()
+        
+        # 一時的にコールバック設定
+        original_on_publish = self.client.on_publish
+        self.client.on_publish = on_publish
+        
+        try:
+            # メッセージ発行
+            result = self.client.publish(topic, message, **options)
+            
+            if result.rc != mqtt.MQTT_ERR_SUCCESS:
+                error = Exception(f"Publish failed with code {result.rc}")
+                self.logger.log_error(error, {
+                    'operation': 'publish',
+                    'topic': topic,
+                    'correlationId': correlation_id
+                })
+                raise error
+            
+            # QoS 0の場合は即座に成功
+            if options.get('qos', 0) == 0:
+                publish_duration = (time.time() - publish_start_time) * 1000
+                self.logger.log_message('sent', topic, message, options)
+                self.logger.log_performance('message_publish', publish_duration, {
+                    'topic': topic,
+                    'qos': 0
+                })
+                return result
+            
+            # QoS 1,2の場合は確認を待つ
+            await asyncio.wait_for(publish_event.wait(), timeout=30)
+            
+            if not publish_result['success']:
+                error = publish_result.get('error', Exception("Publish failed"))
+                raise error
                 
-                if (error) {
-                    this.logger.logError(error, {
-                        operation: 'publish',
-                        topic: topic,
-                        correlationId: correlationId
-                    });
-                    reject(error);
-                } else {
-                    this.logger.logMessage('sent', topic, message, options);
-                    this.logger.logPerformance('message_publish', publishDuration, {
-                        topic: topic,
-                        qos: options.qos
-                    });
-                    resolve(packet);
-                }
-            });
-        });
-    }
+            return publish_result['packet']
+            
+        finally:
+            # コールバックを元に戻す
+            self.client.on_publish = original_on_publish
     
-    async subscribe(topic, options = {}) {
-        const correlationId = `sub_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-        this.logger.setCorrelationId(correlationId);
+    async def subscribe(self, topic, options=None):
+        if options is None:
+            options = {}
         
-        return new Promise((resolve, reject) => {
-            this.client.subscribe(topic, options, (error, granted) => {
-                if (error) {
-                    this.logger.logError(error, {
-                        operation: 'subscribe',
-                        topic: topic,
-                        correlationId: correlationId
-                    });
-                    reject(error);
-                } else {
-                    this.logger.logConnection('subscribed', {
-                        topic: topic,
-                        qos: options.qos,
-                        granted: granted
-                    });
-                    resolve(granted);
-                }
-            });
-        });
-    }
-}
+        import random
+        import string
+        
+        correlation_id = f"sub_{int(time.time() * 1000)}_{''.join(random.choices(string.ascii_letters + string.digits, k=6))}"
+        self.logger.set_correlation_id(correlation_id)
+        
+        # 購読完了を待つためのイベント
+        subscribe_event = asyncio.Event()
+        subscribe_result = {'success': False, 'error': None, 'granted': None}
+        
+        def on_subscribe(client, userdata, mid, granted_qos):
+            nonlocal subscribe_result
+            subscribe_result['success'] = True
+            subscribe_result['granted'] = granted_qos
+            
+            self.logger.log_connection('subscribed', {
+                'topic': topic,
+                'qos': options.get('qos', 0),
+                'granted': granted_qos
+            })
+            
+            subscribe_event.set()
+        
+        # 一時的にコールバック設定
+        original_on_subscribe = self.client.on_subscribe
+        self.client.on_subscribe = on_subscribe
+        
+        try:
+            # 購読実行
+            result = self.client.subscribe(topic, options.get('qos', 0))
+            
+            if result[0] != mqtt.MQTT_ERR_SUCCESS:
+                error = Exception(f"Subscribe failed with code {result[0]}")
+                self.logger.log_error(error, {
+                    'operation': 'subscribe',
+                    'topic': topic,
+                    'correlationId': correlation_id
+                })
+                raise error
+            
+            # 購読確認を待機
+            await asyncio.wait_for(subscribe_event.wait(), timeout=30)
+            
+            if not subscribe_result['success']:
+                error = subscribe_result.get('error', Exception("Subscribe failed"))
+                raise error
+                
+            return subscribe_result['granted']
+            
+        finally:
+            # コールバックを元に戻す
+            self.client.on_subscribe = original_on_subscribe
 ```
 
 ### 10.3.2 ELK Stackによるログ分析

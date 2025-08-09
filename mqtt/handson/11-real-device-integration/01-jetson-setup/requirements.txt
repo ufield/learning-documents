@@ -1,0 +1,35 @@
+# MQTT and IoT Core Dependencies
+paho-mqtt>=1.6.1
+adafruit-circuitpython-dht>=3.7.0
+adafruit-blinka>=8.22.0
+
+# System Monitoring
+psutil>=5.9.0
+GPUtil>=1.4.0
+jetson-stats>=4.2.0
+
+# GPIO Control (Jetson-specific)
+Jetson.GPIO>=2.1.0
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Computer Vision (optional for AI features)
+opencv-python>=4.8.0
+
+# Web Framework (for dashboard)
+flask>=2.3.0
+flask-cors>=4.0.0
+flask-socketio>=5.3.0
+
+# Configuration and Logging
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# Time Series Database (optional)
+influxdb-client>=1.37.0
+
+# Development and Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0

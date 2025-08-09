@@ -23,684 +23,684 @@
 
 ### 9.2.1 基本実装
 
-```javascript
-const awsIot = require('aws-iot-device-sdk-v2');
-const fs = require('fs');
-const crypto = require('crypto');
+```python
+import json
+import time
+import hashlib
+import base64
+import os
+from typing import Dict, Optional, Callable
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+from awsiot.mqtt import MqttClient, QoS
 
-class AWSIoTFileTransfer {
-    constructor(connectionConfig) {
-        this.connection = null;
-        this.connectionConfig = connectionConfig;
-        this.activeTransfers = new Map();
-    }
+class AWSIoTFileTransfer:
+    def __init__(self, connection_config):
+        self.connection = None
+        self.connection_config = connection_config
+        self.active_transfers = {}
+        
+    async def initialize(self):
+        # AWS IoT接続設定は前章と同様
+        self.connection = await self.create_connection(self.connection_config)
+        
+        # ファイル転送関連トピックの購読
+        await self.subscribe_to_file_topics()
     
-    async initialize() {
-        // AWS IoT接続設定は前章と同様
-        this.connection = await this.createConnection(this.connectionConfig);
+    async def subscribe_to_file_topics(self):
+        # ファイル転送ストリーム情報取得
+        await self.connection.subscribe(
+            '$aws/things/+/streams/+/data/+',
+            QoS.AT_LEAST_ONCE,
+            self.handle_stream_data
+        )
         
-        // ファイル転送関連トピックの購読
-        await this.subscribeToFileTopics();
-    }
+        # ファイル転送ストリームリスト
+        await self.connection.subscribe(
+            '$aws/things/+/streams/+/get/accepted',
+            QoS.AT_LEAST_ONCE,
+            self.handle_stream_info
+        )
     
-    async subscribeToFileTopics() {
-        // ファイル転送ストリーム情報取得
-        await this.connection.subscribe('$aws/things/+/streams/+/data/+', 
-            awsIot.mqtt.QoS.AtLeastOnce, (topic, payload) => {
-                this.handleStreamData(topic, payload);
-            });
-            
-        // ファイル転送ストリームリスト
-        await this.connection.subscribe('$aws/things/+/streams/+/get/accepted',
-            awsIot.mqtt.QoS.AtLeastOnce, (topic, payload) => {
-                this.handleStreamInfo(topic, payload);
-            });
-    }
-    
-    async requestFileTransfer(streamId, fileName) {
-        const transferId = this.generateTransferId();
+    async def request_file_transfer(self, stream_id, file_name):
+        transfer_id = self.generate_transfer_id()
         
-        // ファイル転送要求
-        const request = {
-            clientToken: transferId,
-            s: streamId,  // Stream ID
-            f: fileName   // File ID
-        };
-        
-        const topic = `$aws/things/${this.connectionConfig.thingName}/streams/${streamId}/get`;
-        
-        await this.connection.publish(topic, JSON.stringify(request), 
-            awsIot.mqtt.QoS.AtLeastOnce);
-            
-        console.log(`File transfer requested: ${fileName}`);
-        
-        return new Promise((resolve, reject) => {
-            this.activeTransfers.set(transferId, {
-                resolve,
-                reject,
-                streamId,
-                fileName,
-                blocks: new Map(),
-                totalBlocks: 0,
-                receivedBlocks: 0,
-                startTime: Date.now()
-            });
-            
-            // タイムアウト設定
-            setTimeout(() => {
-                if (this.activeTransfers.has(transferId)) {
-                    this.activeTransfers.delete(transferId);
-                    reject(new Error('File transfer timeout'));
-                }
-            }, 300000); // 5分タイムアウト
-        });
-    }
-    
-    handleStreamInfo(topic, payload) {
-        try {
-            const data = JSON.parse(payload.toString());
-            const transferId = data.clientToken;
-            const transfer = this.activeTransfers.get(transferId);
-            
-            if (!transfer) return;
-            
-            // ファイル情報の解析
-            const fileInfo = data.files && data.files[transfer.fileName];
-            if (fileInfo) {
-                transfer.totalBlocks = Math.ceil(fileInfo.s / 1024); // 1KBブロックと仮定
-                transfer.fileSize = fileInfo.s;
-                transfer.checksum = fileInfo.c;
-                
-                console.log(`File info received: ${transfer.fileName}, size: ${fileInfo.s} bytes`);
-                
-                // ブロックデータの要求開始
-                this.requestFileBlocks(transferId);
-            }
-        } catch (error) {
-            console.error('Error handling stream info:', error);
-        }
-    }
-    
-    async requestFileBlocks(transferId) {
-        const transfer = this.activeTransfers.get(transferId);
-        if (!transfer) return;
-        
-        // 複数ブロックを並行して要求
-        const batchSize = 5;
-        
-        for (let blockId = 0; blockId < transfer.totalBlocks; blockId += batchSize) {
-            const blockRequests = [];
-            
-            for (let i = 0; i < batchSize && (blockId + i) < transfer.totalBlocks; i++) {
-                const currentBlockId = blockId + i;
-                blockRequests.push(this.requestSingleBlock(transferId, currentBlockId));
-            }
-            
-            // バッチ処理
-            await Promise.all(blockRequests);
-            
-            // レート制限（デバイスリソース保護）
-            await this.sleep(100);
-        }
-    }
-    
-    async requestSingleBlock(transferId, blockId) {
-        const transfer = this.activeTransfers.get(transferId);
-        if (!transfer) return;
-        
-        const request = {
-            clientToken: transferId,
-            s: transfer.streamId,
-            f: transfer.fileName,
-            l: 1024, // ブロックサイズ
-            o: blockId * 1024, // オフセット
-            n: 1  // 要求ブロック数
-        };
-        
-        const topic = `$aws/things/${this.connectionConfig.thingName}/streams/${transfer.streamId}/data`;
-        
-        await this.connection.publish(topic, JSON.stringify(request), 
-            awsIot.mqtt.QoS.AtLeastOnce);
-    }
-    
-    handleStreamData(topic, payload) {
-        try {
-            const data = JSON.parse(payload.toString());
-            const transferId = data.clientToken;
-            const transfer = this.activeTransfers.get(transferId);
-            
-            if (!transfer) return;
-            
-            // ブロックデータの保存
-            if (data.p) { // payload
-                const blockData = Buffer.from(data.p, 'base64');
-                const blockId = Math.floor(data.o / 1024);
-                
-                transfer.blocks.set(blockId, blockData);
-                transfer.receivedBlocks++;
-                
-                console.log(`Block received: ${blockId + 1}/${transfer.totalBlocks}`);
-                
-                // 全ブロック受信完了チェック
-                if (transfer.receivedBlocks === transfer.totalBlocks) {
-                    this.completeFileTransfer(transferId);
-                }
-            }
-        } catch (error) {
-            console.error('Error handling stream data:', error);
-        }
-    }
-    
-    completeFileTransfer(transferId) {
-        const transfer = this.activeTransfers.get(transferId);
-        if (!transfer) return;
-        
-        try {
-            // ブロックデータの結合
-            const fileBuffer = this.assembleFileFromBlocks(transfer.blocks, transfer.totalBlocks);
-            
-            // チェックサム検証
-            if (transfer.checksum) {
-                const calculatedChecksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-                if (calculatedChecksum !== transfer.checksum) {
-                    throw new Error('Checksum mismatch');
-                }
-            }
-            
-            // ファイル保存
-            const filePath = `./downloads/${transfer.fileName}`;
-            fs.writeFileSync(filePath, fileBuffer);
-            
-            const transferTime = Date.now() - transfer.startTime;
-            console.log(`File transfer completed: ${transfer.fileName}, ${transferTime}ms`);
-            
-            transfer.resolve({
-                fileName: transfer.fileName,
-                filePath: filePath,
-                fileSize: fileBuffer.length,
-                transferTime: transferTime
-            });
-            
-        } catch (error) {
-            transfer.reject(error);
-        } finally {
-            this.activeTransfers.delete(transferId);
-        }
-    }
-    
-    assembleFileFromBlocks(blocks, totalBlocks) {
-        const buffers = [];
-        
-        for (let i = 0; i < totalBlocks; i++) {
-            const block = blocks.get(i);
-            if (!block) {
-                throw new Error(`Missing block: ${i}`);
-            }
-            buffers.push(block);
+        # ファイル転送要求
+        request = {
+            'clientToken': transfer_id,
+            's': stream_id,  # Stream ID
+            'f': file_name   # File ID
         }
         
-        return Buffer.concat(buffers);
-    }
+        topic = f"$aws/things/{self.connection_config['thingName']}/streams/{stream_id}/get"
+        
+        await self.connection.publish(
+            topic,
+            json.dumps(request),
+            QoS.AT_LEAST_ONCE
+        )
+        
+        print(f"File transfer requested: {file_name}")
+        
+        # Promiseの代わりにasyncio.Eventを使用
+        transfer_complete = asyncio.Event()
+        transfer_result = {'success': False, 'data': None, 'error': None}
+        
+        self.active_transfers[transfer_id] = {
+            'event': transfer_complete,
+            'result': transfer_result,
+            'stream_id': stream_id,
+            'file_name': file_name,
+            'blocks': {},
+            'total_blocks': 0,
+            'received_blocks': 0,
+            'start_time': time.time()
+        }
+        
+        # タイムアウト設定
+        try:
+            await asyncio.wait_for(transfer_complete.wait(), timeout=300)  # 5分タイムアウト
+            if transfer_result['success']:
+                return transfer_result['data']
+            else:
+                raise Exception(transfer_result['error'])
+        except asyncio.TimeoutError:
+            if transfer_id in self.active_transfers:
+                del self.active_transfers[transfer_id]
+            raise Exception('File transfer timeout')
     
-    generateTransferId() {
-        return `transfer_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    }
+    def handle_stream_info(self, topic, payload):
+        try:
+            data = json.loads(payload.decode())
+            transfer_id = data.get('clientToken')
+            transfer = self.active_transfers.get(transfer_id)
+            
+            if not transfer:
+                return
+            
+            # ファイル情報の解析
+            file_info = data.get('files', {}).get(transfer['file_name'])
+            if file_info:
+                transfer['total_blocks'] = (file_info['s'] + 1023) // 1024  # 1KBブロックと仮定
+                transfer['file_size'] = file_info['s']
+                transfer['checksum'] = file_info.get('c')
+                
+                print(f"File info received: {transfer['file_name']}, size: {file_info['s']} bytes")
+                
+                # ブロックデータの要求開始
+                asyncio.create_task(self.request_file_blocks(transfer_id))
+                
+        except Exception as error:
+            print(f"Error handling stream info: {error}")
     
-    sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
-}
+    async def request_file_blocks(self, transfer_id):
+        transfer = self.active_transfers.get(transfer_id)
+        if not transfer:
+            return
+        
+        # 複数ブロックを並行して要求
+        batch_size = 5
+        
+        for block_id in range(0, transfer['total_blocks'], batch_size):
+            tasks = []
+            
+            for i in range(batch_size):
+                current_block_id = block_id + i
+                if current_block_id < transfer['total_blocks']:
+                    tasks.append(self.request_single_block(transfer_id, current_block_id))
+            
+            # バッチ処理
+            await asyncio.gather(*tasks)
+            
+            # レート制限（デバイスリソース保護）
+            await asyncio.sleep(0.1)
+    
+    async def request_single_block(self, transfer_id, block_id):
+        transfer = self.active_transfers.get(transfer_id)
+        if not transfer:
+            return
+        
+        request = {
+            'clientToken': transfer_id,
+            's': transfer['stream_id'],
+            'f': transfer['file_name'],
+            'l': 1024,  # ブロックサイズ
+            'o': block_id * 1024,  # オフセット
+            'n': 1  # 要求ブロック数
+        }
+        
+        topic = f"$aws/things/{self.connection_config['thingName']}/streams/{transfer['stream_id']}/data"
+        
+        await self.connection.publish(
+            topic,
+            json.dumps(request),
+            QoS.AT_LEAST_ONCE
+        )
+    
+    def handle_stream_data(self, topic, payload):
+        try:
+            data = json.loads(payload.decode())
+            transfer_id = data.get('clientToken')
+            transfer = self.active_transfers.get(transfer_id)
+            
+            if not transfer:
+                return
+            
+            # ブロックデータの保存
+            if 'p' in data:  # payload
+                block_data = base64.b64decode(data['p'])
+                block_id = data['o'] // 1024
+                
+                transfer['blocks'][block_id] = block_data
+                transfer['received_blocks'] += 1
+                
+                print(f"Block received: {block_id + 1}/{transfer['total_blocks']}")
+                
+                # 全ブロック受信完了チェック
+                if transfer['received_blocks'] == transfer['total_blocks']:
+                    self.complete_file_transfer(transfer_id)
+                    
+        except Exception as error:
+            print(f"Error handling stream data: {error}")
+    
+    def complete_file_transfer(self, transfer_id):
+        transfer = self.active_transfers.get(transfer_id)
+        if not transfer:
+            return
+        
+        try:
+            # ブロックデータの結合
+            file_buffer = self.assemble_file_from_blocks(
+                transfer['blocks'], 
+                transfer['total_blocks']
+            )
+            
+            # チェックサム検証
+            if transfer.get('checksum'):
+                calculated_checksum = hashlib.sha256(file_buffer).hexdigest()
+                if calculated_checksum != transfer['checksum']:
+                    raise Exception('Checksum mismatch')
+            
+            # ファイル保存
+            os.makedirs('./downloads', exist_ok=True)
+            file_path = f"./downloads/{transfer['file_name']}"
+            
+            with open(file_path, 'wb') as f:
+                f.write(file_buffer)
+            
+            transfer_time = (time.time() - transfer['start_time']) * 1000
+            print(f"File transfer completed: {transfer['file_name']}, {transfer_time:.0f}ms")
+            
+            # 結果を設定
+            transfer['result']['success'] = True
+            transfer['result']['data'] = {
+                'file_name': transfer['file_name'],
+                'file_path': file_path,
+                'file_size': len(file_buffer),
+                'transfer_time': transfer_time
+            }
+            
+        except Exception as error:
+            transfer['result']['success'] = False
+            transfer['result']['error'] = str(error)
+        finally:
+            # イベントをセットして待機中のタスクに通知
+            transfer['event'].set()
+            del self.active_transfers[transfer_id]
+    
+    def assemble_file_from_blocks(self, blocks, total_blocks):
+        buffers = []
+        
+        for i in range(total_blocks):
+            if i not in blocks:
+                raise Exception(f"Missing block: {i}")
+            buffers.append(blocks[i])
+        
+        return b''.join(buffers)
+    
+    def generate_transfer_id(self):
+        import random
+        import string
+        timestamp = int(time.time() * 1000)
+        random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=9))
+        return f"transfer_{timestamp}_{random_str}"
 
-// 使用例
-async function downloadFirmwareUpdate() {
-    const fileTransfer = new AWSIoTFileTransfer({
-        thingName: 'industrial-sensor-001',
-        endpoint: 'your-endpoint.iot.us-east-1.amazonaws.com',
-        certPath: './certificate.pem.crt',
-        keyPath: './private.pem.key'
-    });
+# 使用例
+async def download_firmware_update():
+    file_transfer = AWSIoTFileTransfer({
+        'thingName': 'industrial-sensor-001',
+        'endpoint': 'your-endpoint.iot.us-east-1.amazonaws.com',
+        'certPath': './certificate.pem.crt',
+        'keyPath': './private.pem.key'
+    })
     
-    await fileTransfer.initialize();
+    await file_transfer.initialize()
     
-    try {
-        const result = await fileTransfer.requestFileTransfer(
-            'firmware-stream-v1',  // Stream ID
-            'firmware-v2.1.0.bin'   // File name
-        );
+    try:
+        result = await file_transfer.request_file_transfer(
+            'firmware-stream-v1',  # Stream ID
+            'firmware-v2.1.0.bin'  # File name
+        )
         
-        console.log('Firmware download completed:', result);
+        print('Firmware download completed:', result)
         
-        // ファームウェア更新処理
-        await applyFirmwareUpdate(result.filePath);
+        # ファームウェア更新処理
+        await apply_firmware_update(result['filePath'])
         
-    } catch (error) {
-        console.error('Firmware download failed:', error);
-    }
-}
+    except Exception as error:
+        print(f'Firmware download failed: {error}')
 ```
 
 ### 9.2.2 AWS S3 + Pre-signed URLs との組み合わせ
 
-```javascript
-class HybridFileTransfer {
-    constructor(awsConfig) {
-        this.awsConfig = awsConfig;
-        this.s3Client = new AWS.S3();
-        this.iotConnection = null;
-    }
+```python
+import boto3
+from datetime import datetime, timedelta
+
+class HybridFileTransfer:
+    def __init__(self, aws_config):
+        self.aws_config = aws_config
+        self.s3_client = boto3.client('s3')
+        self.iot_connection = None
     
-    async initialize() {
-        // AWS IoT接続
-        this.iotConnection = await this.createIoTConnection();
+    async def initialize(self):
+        # AWS IoT接続
+        self.iot_connection = await self.create_iot_connection()
         
-        // ファイル要求トピックの購読
-        await this.iotConnection.subscribe(`files/${this.awsConfig.thingName}/request`, 
-            awsIot.mqtt.QoS.AtLeastOnce, (topic, payload) => {
-                this.handleFileRequest(topic, payload);
-            });
-    }
+        # ファイル要求トピックの購読
+        await self.iot_connection.subscribe(
+            f"files/{self.aws_config['thingName']}/request",
+            QoS.AT_LEAST_ONCE,
+            self.handle_file_request
+        )
     
-    async handleFileRequest(topic, payload) {
-        try {
-            const request = JSON.parse(payload.toString());
-            const { fileType, version, priority } = request;
+    async def handle_file_request(self, topic, payload):
+        try:
+            request = json.loads(payload.decode())
+            file_type = request.get('fileType')
+            version = request.get('version')
+            priority = request.get('priority')
             
-            // ファイルサイズに応じた転送方法の選択
-            const fileInfo = await this.getFileInfo(fileType, version);
+            # ファイルサイズに応じた転送方法の選択
+            file_info = await self.get_file_info(file_type, version)
             
-            if (fileInfo.size < 1024 * 1024) { // 1MB未満
-                // MQTT経由での転送
-                await this.transferViaMQTT(fileInfo);
-            } else {
-                // S3 Pre-signed URL経由での転送
-                await this.transferViaS3(fileInfo, priority);
-            }
-            
-        } catch (error) {
-            console.error('Error handling file request:', error);
-        }
-    }
-    
-    async transferViaMQTT(fileInfo) {
-        console.log(`Transferring ${fileInfo.name} via MQTT`);
-        
-        const fileData = await fs.promises.readFile(fileInfo.path);
-        const chunks = this.splitIntoChunks(fileData, 32 * 1024); // 32KB chunks
-        
-        // ファイル転送開始通知
-        await this.iotConnection.publish(`files/${this.awsConfig.thingName}/start`, 
-            JSON.stringify({
-                fileName: fileInfo.name,
-                fileSize: fileInfo.size,
-                totalChunks: chunks.length,
-                checksum: crypto.createHash('sha256').update(fileData).digest('hex')
-            }), awsIot.mqtt.QoS.AtLeastOnce);
-        
-        // チャンク送信
-        for (let i = 0; i < chunks.length; i++) {
-            await this.iotConnection.publish(`files/${this.awsConfig.thingName}/chunk`, 
-                JSON.stringify({
-                    fileName: fileInfo.name,
-                    chunkIndex: i,
-                    totalChunks: chunks.length,
-                    data: chunks[i].toString('base64')
-                }), awsIot.mqtt.QoS.AtLeastOnce);
+            if file_info['size'] < 1024 * 1024:  # 1MB未満
+                # MQTT経由での転送
+                await self.transfer_via_mqtt(file_info)
+            else:
+                # S3 Pre-signed URL経由での転送
+                await self.transfer_via_s3(file_info, priority)
                 
-            // レート制限
-            await this.sleep(50);
-        }
-        
-        // 転送完了通知
-        await this.iotConnection.publish(`files/${this.awsConfig.thingName}/complete`, 
-            JSON.stringify({
-                fileName: fileInfo.name,
-                status: 'completed'
-            }), awsIot.mqtt.QoS.AtLeastOnce);
-    }
+        except Exception as error:
+            print(f'Error handling file request: {error}')
     
-    async transferViaS3(fileInfo, priority = 'normal') {
-        console.log(`Transferring ${fileInfo.name} via S3`);
+    async def transfer_via_mqtt(self, file_info):
+        print(f"Transferring {file_info['name']} via MQTT")
         
-        // S3にファイルアップロード（既にアップロード済みと仮定）
-        const s3Key = `firmware/${fileInfo.name}`;
+        with open(file_info['path'], 'rb') as f:
+            file_data = f.read()
         
-        // Pre-signed URL生成
-        const expirationTime = priority === 'urgent' ? 3600 : 7200; // 1-2時間
+        chunks = self.split_into_chunks(file_data, 32 * 1024)  # 32KB chunks
         
-        const presignedUrl = await this.s3Client.getSignedUrlPromise('getObject', {
-            Bucket: this.awsConfig.s3Bucket,
-            Key: s3Key,
-            Expires: expirationTime
-        });
+        # ファイル転送開始通知
+        await self.iot_connection.publish(
+            f"files/{self.aws_config['thingName']}/start",
+            json.dumps({
+                'fileName': file_info['name'],
+                'fileSize': file_info['size'],
+                'totalChunks': len(chunks),
+                'checksum': hashlib.sha256(file_data).hexdigest()
+            }),
+            QoS.AT_LEAST_ONCE
+        )
         
-        // デバイスにダウンロード指示
-        await this.iotConnection.publish(`files/${this.awsConfig.thingName}/download`, 
-            JSON.stringify({
-                fileName: fileInfo.name,
-                fileSize: fileInfo.size,
-                downloadUrl: presignedUrl,
-                method: 'https',
-                checksum: await this.calculateS3FileChecksum(s3Key),
-                priority: priority,
-                expiresAt: new Date(Date.now() + expirationTime * 1000).toISOString()
-            }), awsIot.mqtt.QoS.AtLeastOnce);
-    }
+        # チャンク送信
+        for i, chunk in enumerate(chunks):
+            await self.iot_connection.publish(
+                f"files/{self.aws_config['thingName']}/chunk",
+                json.dumps({
+                    'fileName': file_info['name'],
+                    'chunkIndex': i,
+                    'totalChunks': len(chunks),
+                    'data': base64.b64encode(chunk).decode()
+                }),
+                QoS.AT_LEAST_ONCE
+            )
+            
+            # レート制限
+            await asyncio.sleep(0.05)
+        
+        # 転送完了通知
+        await self.iot_connection.publish(
+            f"files/{self.aws_config['thingName']}/complete",
+            json.dumps({
+                'fileName': file_info['name'],
+                'status': 'completed'
+            }),
+            QoS.AT_LEAST_ONCE
+        )
     
-    splitIntoChunks(buffer, chunkSize) {
-        const chunks = [];
-        for (let i = 0; i < buffer.length; i += chunkSize) {
-            chunks.push(buffer.slice(i, i + chunkSize));
-        }
-        return chunks;
-    }
-    
-    async calculateS3FileChecksum(s3Key) {
-        const response = await this.s3Client.getObject({
-            Bucket: this.awsConfig.s3Bucket,
-            Key: s3Key
-        }).promise();
+    async def transfer_via_s3(self, file_info, priority='normal'):
+        print(f"Transferring {file_info['name']} via S3")
         
-        return crypto.createHash('sha256').update(response.Body).digest('hex');
-    }
-}
+        # S3にファイルアップロード（既にアップロード済みと仮定）
+        s3_key = f"firmware/{file_info['name']}"
+        
+        # Pre-signed URL生成
+        expiration_time = 3600 if priority == 'urgent' else 7200  # 1-2時間
+        
+        presigned_url = self.s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': self.aws_config['s3Bucket'],
+                'Key': s3_key
+            },
+            ExpiresIn=expiration_time
+        )
+        
+        # デバイスにダウンロード指示
+        expires_at = datetime.now() + timedelta(seconds=expiration_time)
+        
+        await self.iot_connection.publish(
+            f"files/{self.aws_config['thingName']}/download",
+            json.dumps({
+                'fileName': file_info['name'],
+                'fileSize': file_info['size'],
+                'downloadUrl': presigned_url,
+                'method': 'https',
+                'checksum': await self.calculate_s3_file_checksum(s3_key),
+                'priority': priority,
+                'expiresAt': expires_at.isoformat()
+            }),
+            QoS.AT_LEAST_ONCE
+        )
+    
+    def split_into_chunks(self, data, chunk_size):
+        chunks = []
+        for i in range(0, len(data), chunk_size):
+            chunks.append(data[i:i + chunk_size])
+        return chunks
+    
+    async def calculate_s3_file_checksum(self, s3_key):
+        response = self.s3_client.get_object(
+            Bucket=self.aws_config['s3Bucket'],
+            Key=s3_key
+        )
+        
+        return hashlib.sha256(response['Body'].read()).hexdigest()
 ```
 
 ## 9.3 デバイス側実装 - ファイル受信とOTA更新
 
 ### 9.3.1 堅牢なファイル受信機構
 
-```javascript
-class RobustFileReceiver {
-    constructor(mqttClient, options = {}) {
-        this.mqttClient = mqttClient;
-        this.downloadDir = options.downloadDir || './downloads';
-        this.tempDir = options.tempDir || './tmp';
-        this.maxRetries = options.maxRetries || 3;
-        this.activeDownloads = new Map();
+```python
+import os
+import shutil
+import aiohttp
+from pathlib import Path
+
+class RobustFileReceiver:
+    def __init__(self, mqtt_client, options=None):
+        if options is None:
+            options = {}
         
-        this.setupDirectories();
-        this.setupMQTTHandlers();
-    }
+        self.mqtt_client = mqtt_client
+        self.download_dir = options.get('download_dir', './downloads')
+        self.temp_dir = options.get('temp_dir', './tmp')
+        self.max_retries = options.get('max_retries', 3)
+        self.active_downloads = {}
+        
+        self.setup_directories()
+        self.setup_mqtt_handlers()
     
-    setupDirectories() {
-        [this.downloadDir, this.tempDir].forEach(dir => {
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
-        });
-    }
+    def setup_directories(self):
+        for directory in [self.download_dir, self.temp_dir]:
+            os.makedirs(directory, exist_ok=True)
     
-    setupMQTTHandlers() {
-        const deviceId = this.mqttClient.options.clientId;
+    def setup_mqtt_handlers(self):
+        device_id = self.mqtt_client.client_id
         
-        // ファイル転送開始
-        this.mqttClient.subscribe(`files/${deviceId}/start`);
+        # ファイル転送開始
+        self.mqtt_client.subscribe(f'files/{device_id}/start')
         
-        // チャンクデータ受信
-        this.mqttClient.subscribe(`files/${deviceId}/chunk`);
+        # チャンクデータ受信
+        self.mqtt_client.subscribe(f'files/{device_id}/chunk')
         
-        // 転送完了通知
-        this.mqttClient.subscribe(`files/${deviceId}/complete`);
+        # 転送完了通知
+        self.mqtt_client.subscribe(f'files/{device_id}/complete')
         
-        // S3ダウンロード指示
-        this.mqttClient.subscribe(`files/${deviceId}/download`);
+        # S3ダウンロード指示
+        self.mqtt_client.subscribe(f'files/{device_id}/download')
         
-        this.mqttClient.on('message', (topic, message) => {
-            this.handleFileMessage(topic, message);
-        });
-    }
+        self.mqtt_client.on_message = self.handle_file_message
     
-    handleFileMessage(topic, message) {
-        try {
-            const data = JSON.parse(message.toString());
+    def handle_file_message(self, client, userdata, message):
+        try:
+            data = json.loads(message.payload.decode())
+            topic = message.topic
             
-            if (topic.endsWith('/start')) {
-                this.handleTransferStart(data);
-            } else if (topic.endsWith('/chunk')) {
-                this.handleChunkReceived(data);
-            } else if (topic.endsWith('/complete')) {
-                this.handleTransferComplete(data);
-            } else if (topic.endsWith('/download')) {
-                this.handleS3Download(data);
-            }
-        } catch (error) {
-            console.error('Error handling file message:', error);
-        }
-    }
+            if topic.endswith('/start'):
+                self.handle_transfer_start(data)
+            elif topic.endswith('/chunk'):
+                self.handle_chunk_received(data)
+            elif topic.endswith('/complete'):
+                self.handle_transfer_complete(data)
+            elif topic.endswith('/download'):
+                asyncio.create_task(self.handle_s3_download(data))
+        except Exception as error:
+            print(f'Error handling file message: {error}')
     
-    handleTransferStart(data) {
-        const { fileName, fileSize, totalChunks, checksum } = data;
+    def handle_transfer_start(self, data):
+        file_name = data.get('fileName')
+        file_size = data.get('fileSize')
+        total_chunks = data.get('totalChunks')
+        checksum = data.get('checksum')
         
-        console.log(`File transfer started: ${fileName} (${fileSize} bytes)`);
+        print(f"File transfer started: {file_name} ({file_size} bytes)")
         
-        const download = {
-            fileName,
-            fileSize,
-            totalChunks,
-            checksum,
-            receivedChunks: new Map(),
-            startTime: Date.now(),
-            retryCount: 0
-        };
-        
-        this.activeDownloads.set(fileName, download);
-    }
-    
-    handleChunkReceived(data) {
-        const { fileName, chunkIndex, totalChunks, data: chunkData } = data;
-        const download = this.activeDownloads.get(fileName);
-        
-        if (!download) {
-            console.warn(`No active download for: ${fileName}`);
-            return;
+        download = {
+            'file_name': file_name,
+            'file_size': file_size,
+            'total_chunks': total_chunks,
+            'checksum': checksum,
+            'received_chunks': {},
+            'start_time': time.time(),
+            'retry_count': 0
         }
         
-        // チャンクデータをデコード
-        const chunkBuffer = Buffer.from(chunkData, 'base64');
-        download.receivedChunks.set(chunkIndex, chunkBuffer);
-        
-        const progress = (download.receivedChunks.size / totalChunks * 100).toFixed(1);
-        console.log(`Progress ${fileName}: ${progress}% (${download.receivedChunks.size}/${totalChunks})`);
-        
-        // 全チャンク受信チェック
-        if (download.receivedChunks.size === totalChunks) {
-            this.assembleAndVerifyFile(fileName);
-        }
-    }
+        self.active_downloads[file_name] = download
     
-    async assembleAndVerifyFile(fileName) {
-        const download = this.activeDownloads.get(fileName);
-        if (!download) return;
+    def handle_chunk_received(self, data):
+        file_name = data.get('fileName')
+        chunk_index = data.get('chunkIndex')
+        total_chunks = data.get('totalChunks')
+        chunk_data = data.get('data')
         
-        try {
-            // チャンクを順序通りに結合
-            const chunks = [];
-            for (let i = 0; i < download.totalChunks; i++) {
-                const chunk = download.receivedChunks.get(i);
-                if (!chunk) {
-                    throw new Error(`Missing chunk: ${i}`);
-                }
-                chunks.push(chunk);
-            }
-            
-            const fileBuffer = Buffer.concat(chunks);
-            
-            // チェックサム検証
-            const calculatedChecksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-            if (calculatedChecksum !== download.checksum) {
-                throw new Error('Checksum verification failed');
-            }
-            
-            // ファイル保存
-            const tempPath = path.join(this.tempDir, `${fileName}.tmp`);
-            const finalPath = path.join(this.downloadDir, fileName);
-            
-            await fs.promises.writeFile(tempPath, fileBuffer);
-            await fs.promises.rename(tempPath, finalPath);
-            
-            const transferTime = Date.now() - download.startTime;
-            console.log(`File received successfully: ${fileName} in ${transferTime}ms`);
-            
-            // ダウンロード完了イベント
-            this.onFileReceived(fileName, finalPath, fileBuffer.length);
-            
-        } catch (error) {
-            console.error(`Error assembling file ${fileName}:`, error);
-            await this.handleTransferError(fileName, error);
-        } finally {
-            this.activeDownloads.delete(fileName);
-        }
-    }
+        download = self.active_downloads.get(file_name)
+        
+        if not download:
+            print(f"No active download for: {file_name}")
+            return
+        
+        # チャンクデータをデコード
+        chunk_buffer = base64.b64decode(chunk_data)
+        download['received_chunks'][chunk_index] = chunk_buffer
+        
+        progress = len(download['received_chunks']) / total_chunks * 100
+        print(f"Progress {file_name}: {progress:.1f}% ({len(download['received_chunks'])}/{total_chunks})")
+        
+        # 全チャンク受信チェック
+        if len(download['received_chunks']) == total_chunks:
+            asyncio.create_task(self.assemble_and_verify_file(file_name))
     
-    async handleS3Download(data) {
-        const { fileName, downloadUrl, checksum, priority } = data;
+    async def assemble_and_verify_file(self, file_name):
+        download = self.active_downloads.get(file_name)
+        if not download:
+            return
         
-        console.log(`Starting S3 download: ${fileName}`);
-        
-        try {
-            const response = await this.downloadFromUrl(downloadUrl, {
-                timeout: priority === 'urgent' ? 60000 : 300000
-            });
+        try:
+            # チャンクを順序通りに結合
+            chunks = []
+            for i in range(download['total_chunks']):
+                if i not in download['received_chunks']:
+                    raise Exception(f"Missing chunk: {i}")
+                chunks.append(download['received_chunks'][i])
             
-            // チェックサム検証
-            const calculatedChecksum = crypto.createHash('sha256').update(response.data).digest('hex');
-            if (calculatedChecksum !== checksum) {
-                throw new Error('S3 download checksum verification failed');
-            }
+            file_buffer = b''.join(chunks)
             
-            // ファイル保存
-            const finalPath = path.join(this.downloadDir, fileName);
-            await fs.promises.writeFile(finalPath, response.data);
+            # チェックサム検証
+            calculated_checksum = hashlib.sha256(file_buffer).hexdigest()
+            if calculated_checksum != download['checksum']:
+                raise Exception('Checksum verification failed')
             
-            console.log(`S3 file downloaded successfully: ${fileName}`);
-            this.onFileReceived(fileName, finalPath, response.data.length);
+            # ファイル保存
+            temp_path = os.path.join(self.temp_dir, f"{file_name}.tmp")
+            final_path = os.path.join(self.download_dir, file_name)
             
-        } catch (error) {
-            console.error(`S3 download failed for ${fileName}:`, error);
-        }
-    }
+            with open(temp_path, 'wb') as f:
+                f.write(file_buffer)
+            
+            shutil.move(temp_path, final_path)
+            
+            transfer_time = (time.time() - download['start_time']) * 1000
+            print(f"File received successfully: {file_name} in {transfer_time:.0f}ms")
+            
+            # ダウンロード完了イベント
+            self.on_file_received(file_name, final_path, len(file_buffer))
+            
+        except Exception as error:
+            print(f"Error assembling file {file_name}: {error}")
+            await self.handle_transfer_error(file_name, error)
+        finally:
+            if file_name in self.active_downloads:
+                del self.active_downloads[file_name]
     
-    async downloadFromUrl(url, options = {}) {
-        const https = require('https');
-        const http = require('http');
+    async def handle_s3_download(self, data):
+        file_name = data.get('fileName')
+        download_url = data.get('downloadUrl')
+        checksum = data.get('checksum')
+        priority = data.get('priority')
         
-        return new Promise((resolve, reject) => {
-            const client = url.startsWith('https:') ? https : http;
-            const timeout = options.timeout || 120000;
+        print(f"Starting S3 download: {file_name}")
+        
+        try:
+            timeout = 60 if priority == 'urgent' else 300
+            response_data = await self.download_from_url(download_url, timeout=timeout)
             
-            const request = client.get(url, (response) => {
-                if (response.statusCode !== 200) {
-                    reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
-                    return;
-                }
+            # チェックサム検証
+            calculated_checksum = hashlib.sha256(response_data).hexdigest()
+            if calculated_checksum != checksum:
+                raise Exception('S3 download checksum verification failed')
+            
+            # ファイル保存
+            final_path = os.path.join(self.download_dir, file_name)
+            with open(final_path, 'wb') as f:
+                f.write(response_data)
+            
+            print(f"S3 file downloaded successfully: {file_name}")
+            self.on_file_received(file_name, final_path, len(response_data))
+            
+        except Exception as error:
+            print(f"S3 download failed for {file_name}: {error}")
+    
+    async def download_from_url(self, url, timeout=120):
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
+        
+        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    raise Exception(f"HTTP {response.status}: {response.reason}")
                 
-                const chunks = [];
-                response.on('data', (chunk) => chunks.push(chunk));
-                response.on('end', () => {
-                    resolve({ data: Buffer.concat(chunks) });
-                });
-            });
-            
-            request.setTimeout(timeout, () => {
-                request.abort();
-                reject(new Error('Download timeout'));
-            });
-            
-            request.on('error', reject);
-        });
-    }
+                return await response.read()
     
-    async handleTransferError(fileName, error) {
-        const download = this.activeDownloads.get(fileName);
-        if (!download) return;
+    async def handle_transfer_error(self, file_name, error):
+        download = self.active_downloads.get(file_name)
+        if not download:
+            return
         
-        download.retryCount++;
+        download['retry_count'] += 1
         
-        if (download.retryCount <= this.maxRetries) {
-            console.log(`Retrying transfer for ${fileName} (attempt ${download.retryCount})`);
+        if download['retry_count'] <= self.max_retries:
+            print(f"Retrying transfer for {file_name} (attempt {download['retry_count']})")
             
-            // 再送要求
-            await this.requestFileRetransfer(fileName);
-        } else {
-            console.error(`Max retries exceeded for ${fileName}`);
-            this.activeDownloads.delete(fileName);
+            # 再送要求
+            await self.request_file_retransfer(file_name)
+        else:
+            print(f"Max retries exceeded for {file_name}")
+            if file_name in self.active_downloads:
+                del self.active_downloads[file_name]
             
-            // エラー通知
-            this.onTransferFailed(fileName, error);
-        }
-    }
+            # エラー通知
+            self.on_transfer_failed(file_name, error)
     
-    async requestFileRetransfer(fileName) {
-        const deviceId = this.mqttClient.options.clientId;
+    async def request_file_retransfer(self, file_name):
+        device_id = self.mqtt_client.client_id
         
-        await this.mqttClient.publish(`files/${deviceId}/retry`, JSON.stringify({
-            fileName: fileName,
-            reason: 'transfer_error',
-            timestamp: new Date().toISOString()
-        }), { qos: 1 });
-    }
+        self.mqtt_client.publish(
+            f'files/{device_id}/retry',
+            json.dumps({
+                'fileName': file_name,
+                'reason': 'transfer_error',
+                'timestamp': datetime.now().isoformat()
+            }),
+            qos=1
+        )
     
-    onFileReceived(fileName, filePath, fileSize) {
-        console.log(`File received event: ${fileName}`);
+    def on_file_received(self, file_name, file_path, file_size):
+        print(f"File received event: {file_name}")
         
-        // ファイルタイプに応じた処理
-        if (fileName.includes('firmware')) {
-            this.handleFirmwareUpdate(filePath);
-        } else if (fileName.includes('config')) {
-            this.handleConfigUpdate(filePath);
-        } else if (fileName.includes('model')) {
-            this.handleMLModelUpdate(filePath);
-        }
-    }
+        # ファイルタイプに応じた処理
+        if 'firmware' in file_name:
+            asyncio.create_task(self.handle_firmware_update(file_path))
+        elif 'config' in file_name:
+            self.handle_config_update(file_path)
+        elif 'model' in file_name:
+            self.handle_ml_model_update(file_path)
     
-    async handleFirmwareUpdate(filePath) {
-        console.log(`Processing firmware update: ${filePath}`);
+    async def handle_firmware_update(self, file_path):
+        print(f"Processing firmware update: {file_path}")
         
-        try {
-            // ファームウェア検証
-            const isValid = await this.validateFirmware(filePath);
-            if (!isValid) {
-                throw new Error('Firmware validation failed');
-            }
+        try:
+            # ファームウェア検証
+            is_valid = await self.validate_firmware(file_path)
+            if not is_valid:
+                raise Exception('Firmware validation failed')
             
-            // 現在のファームウェアのバックアップ
-            await this.backupCurrentFirmware();
+            # 現在のファームウェアのバックアップ
+            await self.backup_current_firmware()
             
-            // ファームウェア適用
-            await this.applyFirmware(filePath);
+            # ファームウェア適用
+            await self.apply_firmware(file_path)
             
-            // 更新完了通知
-            await this.reportFirmwareUpdateStatus('success');
+            # 更新完了通知
+            await self.report_firmware_update_status('success')
             
-            console.log('Firmware update completed successfully');
+            print('Firmware update completed successfully')
             
-        } catch (error) {
-            console.error('Firmware update failed:', error);
-            await this.reportFirmwareUpdateStatus('failed', error.message);
-        }
-    }
+        except Exception as error:
+            print(f'Firmware update failed: {error}')
+            await self.report_firmware_update_status('failed', str(error))
     
-    async validateFirmware(filePath) {
-        // ファームウェア固有の検証ロジック
-        // - デジタル署名検証
-        // - ハードウェア互換性チェック
-        // - バージョン確認
-        return true; // 簡略化
-    }
+    async def validate_firmware(self, file_path):
+        # ファームウェア固有の検証ロジック
+        # - デジタル署名検証
+        # - ハードウェア互換性チェック
+        # - バージョン確認
+        return True  # 簡略化
     
-    async applyFirmware(filePath) {
-        // プラットフォーム固有のファームウェア適用
-        console.log('Applying firmware...');
+    async def apply_firmware(self, file_path):
+        # プラットフォーム固有のファームウェア適用
+        print('Applying firmware...')
         
-        // シミュレーション
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        # シミュレーション
+        await asyncio.sleep(5)
         
-        console.log('Firmware applied, rebooting...');
-        // 実際の環境では process.exit() やシステム再起動
-    }
+        print('Firmware applied, rebooting...')
+        # 実際の環境では os._exit() やシステム再起動
     
-    async reportFirmwareUpdateStatus(status, error = null) {
-        const deviceId = this.mqttClient.options.clientId;
+    async def report_firmware_update_status(self, status, error=None):
+        device_id = self.mqtt_client.client_id
         
         const report = {
             deviceId: deviceId,
